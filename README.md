@@ -53,6 +53,10 @@ Every environment is defined declaratively via Nix, ensuring that the same repos
 
 Real-time, multi-user SSH sessions (via Upterm) enable seamless pair programming and debugging across editors (VS Code, Emacs, Neovim).
 
+#### Optional Editor
+
+SteadyState environments come with ne — the nice editor — a small, fast, and GPL-licensed text editor with familiar keybindings (e.g. Ctrl-C for copy). It’s ideal for quick edits in terminal sessions.
+
 ### 3. Simplicity
 
 The system follows a Unix philosophy:
