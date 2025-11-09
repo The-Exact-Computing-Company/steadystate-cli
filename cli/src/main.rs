@@ -7,15 +7,20 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 use tokio::{select, signal, task, time};
-use tracing::{debug, error, info, warn};
+use tracing::{Level, debug, error, info, warn};
 
 const SERVICE_NAME: &str = "steadystate";
 const BACKEND_ENV: &str = "STEADYSTATE_BACKEND"; // e.g. https://api.steadystate.dev
 const DEFAULT_BACKEND: &str = "http://localhost:8080";
 const JWT_REFRESH_BUFFER_SECS: u64 = 60;
+const DEVICE_POLL_MAX_INTERVAL_SECS: u64 = 30;
+const DEVICE_POLL_REQUEST_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Parser)]
-#[command(name = "steadystate", about = "SteadyState CLI — Exact reproducible dev envs")]
+#[command(
+    name = "steadystate",
+    about = "SteadyState CLI — Exact reproducible dev envs"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Commands,
@@ -111,9 +116,7 @@ async fn write_session(session: &Session) -> Result<()> {
 
 async fn read_session() -> Result<Session> {
     let p = session_file().await?;
-    let bytes = tokio::fs::read(&p)
-        .await
-        .context("read session file")?;
+    let bytes = tokio::fs::read(&p).await.context("read session file")?;
     let s: Session = serde_json::from_slice(&bytes).context("parse session json")?;
     Ok(s)
 }
@@ -178,7 +181,7 @@ fn extract_exp_from_jwt(jwt: &str) -> Option<u64> {
         warn!("Invalid JWT format");
         return None;
     }
-    
+
     // Decode the payload (second part) using base64url decoding
     let payload_bytes = match Base64UrlSafeNoPadding::decode_to_vec(parts[1], None) {
         Ok(bytes) => bytes,
@@ -187,10 +190,22 @@ fn extract_exp_from_jwt(jwt: &str) -> Option<u64> {
             return None;
         }
     };
-    
+
     // Parse the JSON payload to extract 'exp' claim
     match serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
-        Ok(payload) => payload.get("exp").and_then(|v| v.as_u64()),
+        Ok(payload) => match payload.get("exp") {
+            Some(value) => match value.as_u64() {
+                Some(exp) => Some(exp),
+                None => {
+                    warn!("JWT exp claim is not a positive integer");
+                    None
+                }
+            },
+            None => {
+                warn!("JWT missing exp claim");
+                None
+            }
+        },
         Err(e) => {
             warn!("Failed to parse JWT payload: {}", e);
             None
@@ -224,88 +239,106 @@ async fn device_login(client: &Client) -> Result<()> {
     }
 
     let poll_url = format!("{}/auth/poll", backend_url());
-    let interval = dr.interval.unwrap_or(5);
+    let interval = dr.interval.unwrap_or(5).max(1);
+    let max_interval_secs = DEVICE_POLL_MAX_INTERVAL_SECS.max(interval);
     let device_code = dr.device_code.clone();
     let expires_in = dr.expires_in;
-    let start = tokio::time::Instant::now();
 
     println!("Waiting for authorization (press Ctrl+C to cancel)...");
 
-    let mut poll_interval = time::interval(Duration::from_secs(interval));
-    poll_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
-    loop {
-        select! {
-            _ = signal::ctrl_c() => {
-                println!("\nCancelled by user");
-                return Ok(());
-            }
-            _ = poll_interval.tick() => {
-                // Check expiry
-                if start.elapsed().as_secs() > expires_in {
-                    anyhow::bail!("device code expired");
+    let poll_loop = async {
+        let mut current_interval_secs = interval;
+        loop {
+            select! {
+                _ = signal::ctrl_c() => {
+                    println!("\nCancelled by user");
+                    return Ok(());
                 }
+                _ = time::sleep(Duration::from_secs(current_interval_secs)) => {
+                    let poll = client
+                        .get(&poll_url)
+                        .query(&[("device_code", &device_code)])
+                        .timeout(Duration::from_secs(DEVICE_POLL_REQUEST_TIMEOUT_SECS))
+                        .send()
+                        .await
+                        .context("poll request failed")?;
 
-                let poll = client
-                    .get(&poll_url)
-                    .query(&[("device_code", &device_code)])
-                    .send()
-                    .await
-                    .context("poll request failed")?;
-
-                // If pending, backend returns 202
-                if poll.status().as_u16() == 202 {
-                    continue;
-                }
-
-                let out: PollResponse = poll.json().await.context("parse poll response")?;
-
-                if let Some(status) = out.status.as_deref() {
-                    match status {
-                        "pending" => continue,
-                        "complete" => {
-                            let jwt = out.jwt.context("server did not return jwt")?;
-                            let refresh = out.refresh_token.context("no refresh token returned")?;
-                            let login = out.login.context("no login returned")?;
-                            
-                            // store refresh token in keychain
-                            store_refresh_token(&login, &refresh).await?;
-                            
-                            // write session file with jwt + expiry
-                            let jwt_exp = extract_exp_from_jwt(&jwt);
-                            let session = Session {
-                                login: login.clone(),
-                                jwt: jwt.clone(),
-                                jwt_exp,
-                            };
-                            write_session(&session).await?;
-                            println!("✅ Logged in as {}", login);
-                            return Ok(());
-                        }
-                        other => {
-                            warn!("unexpected status: {}", other);
-                            continue;
-                        }
+                    // If pending, backend returns 202
+                    if poll.status().as_u16() == 202 {
+                        current_interval_secs = current_interval_secs
+                            .saturating_mul(3)
+                            .saturating_div(2)
+                            .clamp(interval, max_interval_secs);
+                        continue;
                     }
-                } else if let Some(err) = out.error {
-                    match err.as_str() {
-                        "authorization_pending" => continue,
-                        "slow_down" => {
-                            // Adjust interval for next iteration
-                            poll_interval = time::interval(Duration::from_secs(interval + 5));
-                            poll_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-                            continue;
+
+                    let out: PollResponse = poll.json().await.context("parse poll response")?;
+
+                    if let Some(status) = out.status.as_deref() {
+                        match status {
+                            "pending" => {
+                                current_interval_secs = current_interval_secs
+                                    .saturating_mul(3)
+                                    .saturating_div(2)
+                                    .clamp(interval, max_interval_secs);
+                                continue;
+                            }
+                            "complete" => {
+                                let jwt = out.jwt.context("server did not return jwt")?;
+                                let refresh = out
+                                    .refresh_token
+                                    .context("no refresh token returned")?;
+                                let login = out.login.context("no login returned")?;
+
+                                // store refresh token in keychain
+                                store_refresh_token(&login, &refresh).await?;
+
+                                // write session file with jwt + expiry
+                                let jwt_exp = extract_exp_from_jwt(&jwt);
+                                let session = Session {
+                                    login: login.clone(),
+                                    jwt: jwt.clone(),
+                                    jwt_exp,
+                                };
+                                write_session(&session).await?;
+                                println!("✅ Logged in as {}", login);
+                                return Ok(());
+                            }
+                            other => {
+                                warn!("unexpected status: {}", other);
+                                continue;
+                            }
                         }
-                        "access_denied" => {
-                            anyhow::bail!("authorization denied by user");
-                        }
-                        _ => {
-                            anyhow::bail!("authorization error: {}", err);
+                    } else if let Some(err) = out.error {
+                        match err.as_str() {
+                            "authorization_pending" => {
+                                current_interval_secs = current_interval_secs
+                                    .saturating_mul(3)
+                                    .saturating_div(2)
+                                    .clamp(interval, max_interval_secs);
+                                continue;
+                            }
+                            "slow_down" => {
+                                current_interval_secs = (current_interval_secs + 5)
+                                    .clamp(interval, max_interval_secs);
+                                continue;
+                            }
+                            "access_denied" => {
+                                anyhow::bail!("authorization denied by user");
+                            }
+                            _ => {
+                                anyhow::bail!("authorization error: {}", err);
+                            }
                         }
                     }
                 }
             }
         }
+    };
+
+    match time::timeout(Duration::from_secs(expires_in), poll_loop).await {
+        Ok(res) => res,
+        Err(_) => anyhow::bail!("device code expired"),
     }
 }
 
@@ -314,7 +347,7 @@ async fn perform_refresh(client: &Client) -> Result<String> {
     let session = read_session()
         .await
         .context("no existing session; run `steadystate login`")?;
-    
+
     let username = session.login.clone();
     let refresh = get_refresh_token(&username).await?.ok_or_else(|| {
         anyhow::anyhow!("no refresh token in keychain; run `steadystate login` again")
@@ -337,8 +370,12 @@ async fn perform_refresh(client: &Client) -> Result<String> {
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("refresh failed ({}): {}", status, body);
+        if tracing::enabled!(Level::DEBUG) {
+            if let Ok(body) = resp.text().await {
+                debug!("refresh failed body: {}", body);
+            }
+        }
+        anyhow::bail!("refresh failed with status {}", status);
     }
 
     let body: serde_json::Value = resp.json().await.context("parse refresh response")?;
@@ -370,7 +407,7 @@ where
         .await
         .context("no session found; please login")?;
     let mut jwt = session.jwt.clone();
-    
+
     // check expiry within buffer window
     let mut need_refresh = false;
     if let Some(exp) = session.jwt_exp {
@@ -382,7 +419,7 @@ where
             need_refresh = true;
         }
     }
-    
+
     if need_refresh {
         info!("JWT near expiry, refreshing proactively");
         jwt = perform_refresh(client).await?;
@@ -390,30 +427,39 @@ where
 
     let req = builder_fn(client, &jwt);
     let resp = req.send().await.context("request failed")?;
-    
+
     // if 401, try one refresh and retry once
     if resp.status().as_u16() == 401 {
         info!("Got 401, attempting token refresh");
         jwt = perform_refresh(client).await?;
+        time::sleep(Duration::from_millis(500)).await;
         let req2 = builder_fn(client, &jwt);
         let resp2 = req2.send().await.context("request retry failed")?;
-        
+
         if !resp2.status().is_success() {
             let status = resp2.status();
-            let body = resp2.text().await.unwrap_or_default();
-            anyhow::bail!("request failed after retry ({}): {}", status, body);
+            if tracing::enabled!(Level::DEBUG) {
+                if let Ok(body) = resp2.text().await {
+                    debug!("request retry body: {}", body);
+                }
+            }
+            anyhow::bail!("request failed after retry with status {}", status);
         }
-        
+
         let body = resp2.json::<T>().await.context("parse response")?;
         return Ok(body);
     }
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("request failed ({}): {}", status, body);
+        if tracing::enabled!(Level::DEBUG) {
+            if let Ok(body) = resp.text().await {
+                debug!("request body: {}", body);
+            }
+        }
+        anyhow::bail!("request failed with status {}", status);
     }
-    
+
     let body = resp.json::<T>().await.context("parse response")?;
     Ok(body)
 }
@@ -471,7 +517,7 @@ async fn logout(client: &Client) -> Result<()> {
         }
     };
     let username = session.login.clone();
-    
+
     // attempt to revoke on backend if refresh token exists
     if let Some(refresh) = get_refresh_token(&username).await? {
         let url = format!("{}/auth/revoke", backend_url());
@@ -492,7 +538,7 @@ async fn logout(client: &Client) -> Result<()> {
             }
         }
     }
-    
+
     // delete local artifacts
     let _ = delete_refresh_token(&username).await;
     let _ = remove_session().await;
@@ -512,7 +558,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let client = Client::builder()
-        .user_agent("SteadyStateCLI/0.1")
+        .user_agent("SteadyStateCLI/0.2")
         .timeout(Duration::from_secs(30))
         .build()
         .context("create http client")?;
