@@ -132,7 +132,6 @@ pub async fn device_login(client: &Client) -> Result<()> {
                                 store_refresh_token(&login, &refresh).await?;
 
                                 let session = Session::new(login.clone(), jwt.clone());
-                                // FIX: Pass `None` to use the default session path.
                                 write_session(&session, None).await?;
                                 println!("✅ Logged in as {}", login);
                                 return Ok(());
@@ -181,9 +180,10 @@ pub async fn device_login(client: &Client) -> Result<()> {
 }
 
 /// Refreshes JWT using stored refresh token.
-pub async fn perform_refresh(client: &Client) -> Result<String> {
-    // FIX: Pass `None` to use the default session path.
-    let session = read_session(None)
+// FIX: Add `override_dir` parameter to be passed down.
+pub async fn perform_refresh(client: &Client, override_dir: Option<&PathBuf>) -> Result<String> {
+    // FIX: Pass the `override_dir` to `read_session`.
+    let session = read_session(override_dir)
         .await
         .context("No active session found. Run 'steadystate login' first.")?;
 
@@ -203,14 +203,13 @@ pub async fn perform_refresh(client: &Client) -> Result<String> {
 
     if resp.status().as_u16() == 401 {
         let _ = delete_refresh_token(&username).await;
-        // FIX: Pass `None` to use the default session path.
-        let _ = remove_session(None).await;
+        // FIX: Pass the `override_dir` to `remove_session`.
+        let _ = remove_session(override_dir).await;
         anyhow::bail!("Refresh token expired. Run 'steadystate login' to authenticate again.");
     }
 
     if !resp.status().is_success() {
         let status = resp.status();
-        // Debug logs may include sensitive response bodies (JWTs).
         if tracing::enabled!(tracing::Level::DEBUG) {
             if let Ok(body) = resp.text().await {
                 debug!("refresh failed body: {}", body);
@@ -227,39 +226,45 @@ pub async fn perform_refresh(client: &Client) -> Result<String> {
         .to_string();
 
     let new_session = Session::new(username.clone(), jwt.clone());
-    // FIX: Pass `None` to use the default session path.
-    write_session(&new_session, None).await?;
+    // FIX: Pass the `override_dir` to `write_session`.
+    write_session(&new_session, override_dir).await?;
     Ok(jwt)
 }
 
 /// Makes authenticated request with automatic token refresh.
-pub async fn request_with_auth<T, F>(client: &Client, builder_fn: F) -> Result<T>
+// FIX: Add `override_dir` parameter to be passed down.
+pub async fn request_with_auth<T, F>(
+    client: &Client,
+    builder_fn: F,
+    override_dir: Option<&PathBuf>,
+) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
     F: Fn(&Client, &str) -> reqwest::RequestBuilder,
 {
-    // FIX: Pass `None` to use the default session path.
-    let session = read_session(None)
+    // FIX: Pass the `override_dir` to `read_session`.
+    let session = read_session(override_dir)
         .await
         .context("No active session found. Run 'steadystate login' first.")?;
     let mut jwt = session.jwt.clone();
 
     if session.is_near_expiry(JWT_REFRESH_BUFFER_SECS) {
         info!("JWT near expiry, refreshing proactively");
-        jwt = perform_refresh(client).await?;
+        // FIX: Pass the `override_dir` to `perform_refresh`.
+        jwt = perform_refresh(client, override_dir).await?;
     }
 
     let resp = send_with_retries(|| builder_fn(client, &jwt)).await?;
 
     if resp.status().as_u16() == 401 {
         info!("Got 401, attempting token refresh");
-        jwt = perform_refresh(client).await?;
+        // FIX: Pass the `override_dir` to `perform_refresh`.
+        jwt = perform_refresh(client, override_dir).await?;
         time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
         let resp2 = send_with_retries(|| builder_fn(client, &jwt)).await?;
 
         if !resp2.status().is_success() {
             let status = resp2.status();
-            // Debug logs may include sensitive response bodies (JWTs).
             if tracing::enabled!(tracing::Level::DEBUG) {
                 if let Ok(body) = resp2.text().await {
                     debug!("request retry body: {}", body);
@@ -274,7 +279,6 @@ where
 
     if !resp.status().is_success() {
         let status = resp.status();
-        // Debug logs may include sensitive response bodies (JWTs).
         if tracing::enabled!(tracing::Level::DEBUG) {
             if let Ok(body) = resp.text().await {
                 debug!("request body: {}", body);
@@ -286,6 +290,8 @@ where
     let body = resp.json::<T>().await.context("parse response")?;
     Ok(body)
 }
+
+// ... (rest of the file from extract_exp_from_jwt down is unchanged until the tests)
 
 /// Extracts expiry timestamp from JWT (no signature verification).
 pub fn extract_exp_from_jwt(jwt: &str) -> Option<u64> {
@@ -399,7 +405,6 @@ mod tests {
     use super::*;
     use tempfile::{tempdir, TempDir};
 
-    // FIX: Replaced old TestContext with the new, safer, isolated version.
     struct TestContext {
         _dir: TempDir,
         path: PathBuf,
@@ -675,10 +680,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform_refresh_without_session() {
-        let _ctx = TestContext::new();
+        let ctx = TestContext::new();
         let client = Client::new();
 
-        let result = perform_refresh(&client).await;
+        // FIX: Pass the test's temp path to the function.
+        let result = perform_refresh(&client, Some(&ctx.path)).await;
         assert!(result.is_err());
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(err_msg.contains("No active session found"));
@@ -690,18 +696,18 @@ mod tests {
         let client = Client::new();
 
         let session = Session::new("test_user".to_string(), "fake_jwt".to_string());
-        // FIX: Pass the test's temp path to the session function.
         write_session(&session, Some(&ctx.path))
             .await
             .expect("write session");
 
-        let result = perform_refresh(&client).await;
+        // FIX: Pass the test's temp path to the function.
+        let result = perform_refresh(&client, Some(&ctx.path)).await;
         assert!(result.is_err());
         let err_msg = format!("{:#}", result.unwrap_err());
+        // This assertion will now correctly check for the "no refresh token" error.
         assert!(err_msg.contains("no refresh token"));
 
         // Clean up
-        // FIX: Pass the test's temp path to the session function.
         let _ = crate::session::remove_session(Some(&ctx.path)).await;
     }
-            }
+}
