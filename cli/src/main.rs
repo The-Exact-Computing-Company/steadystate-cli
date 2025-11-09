@@ -68,7 +68,8 @@ struct WhoamiOutput {
 }
 
 async fn whoami(json_output: bool) -> Result<()> {
-    match read_session().await {
+    // FIX: Pass `None` to use the default session path.
+    match read_session(None).await {
         Ok(sess) => {
             if json_output {
                 let output = WhoamiOutput {
@@ -111,7 +112,8 @@ async fn whoami(json_output: bool) -> Result<()> {
 }
 
 async fn logout(client: &Client) -> Result<()> {
-    let session = match read_session().await {
+    // FIX: Pass `None` to use the default session path.
+    let session = match read_session(None).await {
         Ok(s) => s,
         Err(_) => {
             println!("No active session");
@@ -142,7 +144,8 @@ async fn logout(client: &Client) -> Result<()> {
     }
 
     let _ = delete_refresh_token(&username).await;
-    let _ = remove_session().await;
+    // FIX: Pass `None` to use the default session path.
+    let _ = remove_session(None).await;
     println!("Logged out (local tokens removed).");
     Ok(())
 }
@@ -247,4 +250,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
+                }
