@@ -250,11 +250,18 @@ async fn main() -> Result<()> {
         }
         Commands::Up { repo, json } => {
             if let Err(e) = up(&client, repo, json).await {
-                // ** THIS IS THE FIX ** (Removed the stray period)
+                // Removed the stray period
                 error!("up failed: {:#}", e);
                 std::process::exit(1);
             }
         }
+        Commands::TestSetupKeychain { username, token } => {
+            // This is a hidden command for integration testing only
+            auth::store_refresh_token(&username, &token).await?;
+            // Optional: print a confirmation for easier debugging
+            // println!("Test token stored for user '{}'.", username);
+        }
+    }
     }
 
     Ok(())
