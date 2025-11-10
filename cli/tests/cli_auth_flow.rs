@@ -108,30 +108,28 @@ fn read_full_request(mut stream: &TcpStream) -> String {
 fn up_handles_401_then_refreshes_then_succeeds() {
     let td = TempDir::new().unwrap();
 
-    // SETUP: Store a fake refresh token so the refresh logic can be triggered.
     let setup_res = run_cli(None, &[], &["test-setup-keychain", "me", "MY_REFRESH_TOKEN"]);
     assert!(setup_res.status.success(), "Failed to set up keychain");
 
-    // SETUP: Write a session file with a JWT that is not yet expired.
     write_session(&td, "me", "OLD_JWT", Some(5_000_000_000));
 
     let call_counter = Arc::new(AtomicUsize::new(0));
     let mock_server = MockServer::new(move |req, stream| {
         let call = call_counter.fetch_add(1, Ordering::SeqCst);
         match call {
-            0 => { // First call to /sessions -> return 401
+            0 => {
                 assert!(req.starts_with("POST /sessions"), "Expected /sessions, got: {}", req);
                 assert!(req.contains("bearer OLD_JWT"));
                 let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
                 stream.write_all(resp.as_bytes()).unwrap();
             }
-            1 => { // Second call -> refresh request
+            1 => {
                 assert!(req.starts_with("POST /auth/refresh"), "Expected /auth/refresh, got: {}", req);
                 let body = r#"{"jwt":"NEW_JWT"}"#;
                 let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
                 stream.write_all(resp.as_bytes()).unwrap();
             }
-            2 => { // Third call -> retry /sessions -> success
+            2 => {
                 assert!(req.starts_with("POST /sessions"), "Expected retry to /sessions, got: {}", req);
                 assert!(req.contains("bearer NEW_JWT"));
                 let body = r#"{"id":"abc","ssh_url":"ssh://ok"}"#;
@@ -158,11 +156,9 @@ fn up_handles_401_then_refreshes_then_succeeds() {
 fn up_forces_refresh_when_jwt_expired() {
     let td = TempDir::new().unwrap();
 
-    // SETUP: Store a fake refresh token.
     let setup_res = run_cli(None, &[], &["test-setup-keychain", "me", "MY_REFRESH_TOKEN"]);
     assert!(setup_res.status.success(), "Failed to set up keychain");
 
-    // SETUP: Write a session file with an expired JWT.
     let expired = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 10;
     write_session(&td, "me", "EXPIRED_JWT", Some(expired));
 
@@ -170,13 +166,13 @@ fn up_forces_refresh_when_jwt_expired() {
     let mock_server = MockServer::new(move |req, stream| {
         let call = call_counter.fetch_add(1, Ordering::SeqCst);
         match call {
-            0 => { // First call -> proactive refresh
+            0 => {
                 assert!(req.starts_with("POST /auth/refresh"), "Expected /auth/refresh, got: {}", req);
                 let body = r#"{"jwt":"FRESH"}"#;
                 let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
                 stream.write_all(resp.as_bytes()).unwrap();
             }
-            1 => { // Second call -> original /sessions request
+            1 => {
                 assert!(req.starts_with("POST /sessions"), "Expected /sessions, got: {}", req);
                 assert!(req.contains("bearer FRESH"));
                 let body = r#"{"id":"abc","ssh_url":"ssh://ok"}"#;
@@ -203,10 +199,8 @@ fn up_forces_refresh_when_jwt_expired() {
 fn logout_removes_session_and_revokes_refresh() {
     let td = TempDir::new().unwrap();
 
-    // SETUP: Write a valid session file.
     write_session(&td, "me", "jwt", Some(5_000_000_000));
 
-    // SETUP: Store a fake refresh token to be revoked.
     let setup_res = run_cli(None, &[], &["test-setup-keychain", "me", "MY_REFRESH_TOKEN"]);
     assert!(setup_res.status.success(), "Failed to set up keychain");
 
@@ -226,6 +220,5 @@ fn logout_removes_session_and_revokes_refresh() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("Logged out"));
 
-    // Session file should be gone
     assert!(!td.path().join("steadystate/session.json").exists());
-}```
+}
