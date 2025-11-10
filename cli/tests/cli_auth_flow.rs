@@ -37,7 +37,6 @@ fn run_cli(path: Option<&TempDir>, envs: &[(&str, String)], args: &[&str]) -> Ou
 struct MockServer {
     addr: String,
     handle: Option<std::thread::JoinHandle<()>>,
-    // The server struct owns the listener. When the struct is dropped, the listener is dropped.
     _listener: TcpListener,
 }
 
@@ -51,18 +50,16 @@ impl MockServer {
         let listener_clone = listener.try_clone().unwrap();
 
         let handle = std::thread::spawn(move || {
-            // This loop will accept multiple connections.
             for stream in listener_clone.incoming() {
                 match stream {
                     Ok(mut stream) => {
-                        let req = read_full_request(&mut stream);
-                        handler(req, &mut stream);
+                        if let Ok(req) = read_full_request(&mut stream) {
+                            handler(req, &mut stream);
+                        }
+                        // Explicitly shutdown and drop the stream to close connection
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
                     }
-                    Err(_) => {
-                        // When the original listener is dropped, `incoming()` will return an error,
-                        // breaking the loop and allowing the thread to exit cleanly.
-                        break;
-                    }
+                    Err(_) => break,
                 }
             }
         });
@@ -77,33 +74,77 @@ impl MockServer {
 
 impl Drop for MockServer {
     fn drop(&mut self) {
-        // When this struct is dropped, Rust automatically drops the `_listener` field first.
-        // This closes the socket and causes the `incoming()` iterator in the thread to end.
+        // Dropping the listener will cause incoming() to fail
         if let Some(handle) = self.handle.take() {
-            // Now that the thread is guaranteed to exit, we can safely join it.
             handle.join().unwrap();
         }
     }
 }
 
-fn read_full_request(stream: &mut TcpStream) -> String {
-    let mut buf = [0u8; 4096];
+fn read_full_request(stream: &mut TcpStream) -> std::io::Result<String> {
+    let mut buf = [0u8; 8192];
     let mut out = Vec::new();
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    let mut headers_done = false;
+    let mut content_length = 0;
+    
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
 
+    // Read headers
     loop {
         match stream.read(&mut buf) {
-            Ok(0) => break, // Connection closed
+            Ok(0) => break,
             Ok(n) => {
                 out.extend_from_slice(&buf[..n]);
-                if out.windows(4).any(|w| w == b"\r\n\r\n") {
+                
+                // Check for end of headers
+                if let Some(pos) = out.windows(4).position(|w| w == b"\r\n\r\n") {
+                    headers_done = true;
+                    
+                    // Parse Content-Length from headers
+                    let headers = String::from_utf8_lossy(&out[..pos]);
+                    for line in headers.lines() {
+                        if line.to_lowercase().starts_with("content-length:") {
+                            if let Some(len_str) = line.split(':').nth(1) {
+                                content_length = len_str.trim().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                    
+                    let headers_end = pos + 4;
+                    let body_received = out.len() - headers_end;
+                    
+                    // If we have all the body, we're done
+                    if body_received >= content_length {
+                        break;
+                    }
+                    
+                    // Otherwise, read the remaining body
+                    let mut remaining = content_length - body_received;
+                    while remaining > 0 {
+                        match stream.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                out.extend_from_slice(&buf[..n]);
+                                remaining = remaining.saturating_sub(n);
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     break;
                 }
             }
-            Err(_) => break, // Timeout or other error
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Timeout - if we got headers without content-length, that's fine
+                if headers_done && content_length == 0 {
+                    break;
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
         }
     }
-    String::from_utf8_lossy(&out).to_string()
+    
+    Ok(String::from_utf8_lossy(&out).to_string())
 }
 
 //
@@ -129,20 +170,23 @@ fn up_handles_401_then_refreshes_then_succeeds() {
                     assert!(req.starts_with("POST /sessions"), "Expected /sessions, got: {}", req);
                     assert!(req.to_lowercase().contains("bearer old_jwt"));
                     let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
-                    stream.write_all(resp.as_bytes()).unwrap();
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
                 }
                 1 => {
                     assert!(req.starts_with("POST /auth/refresh"), "Expected /auth/refresh, got: {}", req);
                     let body = r#"{"jwt":"NEW_JWT"}"#;
                     let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-                    stream.write_all(resp.as_bytes()).unwrap();
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
                 }
                 2 => {
                     assert!(req.starts_with("POST /sessions"), "Expected retry to /sessions, got: {}", req);
                     assert!(req.to_lowercase().contains("bearer new_jwt"));
                     let body = r#"{"id":"abc","ssh_url":"ssh://ok"}"#;
                     let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-                    stream.write_all(resp.as_bytes()).unwrap();
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
                 }
                 _ => panic!("Unexpected request number {}", call),
             }
@@ -181,14 +225,16 @@ fn up_forces_refresh_when_jwt_expired() {
                     assert!(req.starts_with("POST /auth/refresh"), "Expected /auth/refresh, got: {}", req);
                     let body = r#"{"jwt":"FRESH"}"#;
                     let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-                    stream.write_all(resp.as_bytes()).unwrap();
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
                 }
                 1 => {
                     assert!(req.starts_with("POST /sessions"), "Expected /sessions, got: {}", req);
                     assert!(req.to_lowercase().contains("bearer fresh"));
                     let body = r#"{"id":"abc","ssh_url":"ssh://ok"}"#;
                     let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-                    stream.write_all(resp.as_bytes()).unwrap();
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
                 }
                 _ => panic!("Unexpected request number {}", call),
             }
@@ -219,7 +265,8 @@ fn logout_removes_session_and_revokes_refresh() {
     let mock_server = MockServer::new(|req, stream| {
         assert!(req.starts_with("POST /auth/revoke"), "Expected /auth/revoke, got {}", req);
         let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-        stream.write_all(resp.as_bytes()).unwrap();
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
     });
 
     let out = run_cli(
