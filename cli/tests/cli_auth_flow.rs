@@ -161,4 +161,4 @@ fn logout_removes_session_and_revokes_refresh() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("Logged out"));
     assert!(!td.path().join("steadystate/session.json").exists());
-}```
+}
