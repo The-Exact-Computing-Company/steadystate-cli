@@ -30,6 +30,7 @@ struct PollResponse {
     status: Option<String>,
     jwt: Option<String>,
     refresh_token: Option<String>,
+    #[allow(dead_code)]
     refresh_expires_at: Option<u64>,
     login: Option<String>,
     error: Option<String>,
@@ -686,8 +687,9 @@ mod tests {
         // Clean up
         let _ = crate::session::remove_session(Some(&ctx.path)).await;
     }
+
     #[tokio::test]
-    async fn test_request_with_auth_handles_401_and_refreshes() {
+async fn test_request_with_auth_handles_401_and_refreshes() {
     use mockito::Server;
     
     let ctx = TestContext::new();
@@ -711,7 +713,9 @@ mod tests {
     let mut server = Server::new();
     
     // Override BACKEND_URL for this test
-    std::env::set_var("STEADYSTATE_BACKEND", server.url());
+    unsafe {  // ADD THIS
+        std::env::set_var("STEADYSTATE_BACKEND", server.url());
+    }
 
     // Mock initial request that returns 401
     let mock_request_401 = server
@@ -763,6 +767,8 @@ mod tests {
 
     // Clean up
     delete_refresh_token(username).await.expect("cleanup");
-    std::env::remove_var("STEADYSTATE_BACKEND");
-}
+    unsafe {  // ADD THIS
+        std::env::remove_var("STEADYSTATE_BACKEND");
+    }
+    }                
 }
