@@ -1,9 +1,8 @@
 use std::fs;
+use std::io::Read;
 use std::process::Output;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use tempfile::TempDir;
-use mockito::{mock, Matcher};
+use mockito::{Matcher, Server};
 
 // --- Utility helpers ---
 
@@ -31,7 +30,9 @@ fn run_cli(path: Option<&TempDir>, envs: &[(&str, String)], args: &[&str]) -> Ou
     cmd.output().expect("run cli")
 }
 
+//
 // --- TESTS ---
+//
 
 #[test]
 fn up_handles_401_then_refreshes_then_succeeds() {
@@ -41,16 +42,20 @@ fn up_handles_401_then_refreshes_then_succeeds() {
     assert!(setup.status.success(), "Failed to set up keychain for test");
 
     write_session(&td, "me", "OLD_JWT", Some(5_000_000_000));
+    
+    // Create a mock server instance for this test.
+    let mut server = Server::new();
+    let url = server.url();
 
     // Mock the initial request that gets a 401
-    let mock_sessions_1 = mock("POST", "/sessions")
+    let mock_sessions_1 = server.mock("POST", "/sessions")
         .with_status(401)
         .match_header("Authorization", "Bearer OLD_JWT")
         .expect(1)
         .create();
 
     // Mock the refresh request
-    let mock_refresh = mock("POST", "/auth/refresh")
+    let mock_refresh = server.mock("POST", "/auth/refresh")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"jwt":"NEW_JWT"}"#)
@@ -58,7 +63,7 @@ fn up_handles_401_then_refreshes_then_succeeds() {
         .create();
 
     // Mock the retried request
-    let mock_sessions_2 = mock("POST", "/sessions")
+    let mock_sessions_2 = server.mock("POST", "/sessions")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"id":"abc","ssh_url":"ssh://ok"}"#)
@@ -68,7 +73,7 @@ fn up_handles_401_then_refreshes_then_succeeds() {
 
     let out = run_cli(
         Some(&td),
-        &[("STEADYSTATE_BACKEND", mockito::server_url())],
+        &[("STEADYSTATE_BACKEND", url)],
         &["up", "https://github.com/x/y"],
     );
     
@@ -92,8 +97,11 @@ fn up_forces_refresh_when_jwt_expired() {
     let expired = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 10;
     write_session(&td, "me", "EXPIRED_JWT", Some(expired));
 
+    let mut server = Server::new();
+    let url = server.url();
+
     // Mock the proactive refresh request
-    let mock_refresh = mock("POST", "/auth/refresh")
+    let mock_refresh = server.mock("POST", "/auth/refresh")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"jwt":"FRESH"}"#)
@@ -101,7 +109,7 @@ fn up_forces_refresh_when_jwt_expired() {
         .create();
 
     // Mock the original /sessions request, now with the fresh token
-    let mock_sessions = mock("POST", "/sessions")
+    let mock_sessions = server.mock("POST", "/sessions")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"id":"abc","ssh_url":"ssh://ok"}"#)
@@ -111,7 +119,7 @@ fn up_forces_refresh_when_jwt_expired() {
 
     let out = run_cli(
         Some(&td),
-        &[("STEADYSTATE_BACKEND", mockito::server_url())],
+        &[("STEADYSTATE_BACKEND", url)],
         &["up", "https://github.com/x/y"],
     );
 
@@ -131,9 +139,12 @@ fn logout_removes_session_and_revokes_refresh() {
     
     let setup = run_cli(None, &[], &["test-setup-keychain", "me", "MY_REFRESH_TOKEN"]);
     assert!(setup.status.success(), "Failed to set up keychain for test");
+    
+    let mut server = Server::new();
+    let url = server.url();
 
     // Mock the revoke endpoint
-    let mock_revoke = mock("POST", "/auth/revoke")
+    let mock_revoke = server.mock("POST", "/auth/revoke")
         .with_status(204) // 204 No Content is common for revoke
         .match_body(Matcher::JsonString(r#"{"refresh_token":"MY_REFRESH_TOKEN"}"#.to_string()))
         .expect(1)
@@ -141,7 +152,7 @@ fn logout_removes_session_and_revokes_refresh() {
 
     let out = run_cli(
         Some(&td),
-        &[("STEADYSTATE_BACKEND", mockito::server_url())],
+        &[("STEADYSTATE_BACKEND", url)],
         &["logout"],
     );
 
