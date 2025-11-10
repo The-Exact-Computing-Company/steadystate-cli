@@ -57,6 +57,12 @@ enum Commands {
         /// Output in JSON format
         #[arg(long)]
         json: bool,
+    }
+    /// (For integration testing only) Stores a token in the keychain.
+    #[command(hide = true)]
+    TestSetupKeychain {
+        username: String,
+        token: String,
     },
 }
 
