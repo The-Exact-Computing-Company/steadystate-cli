@@ -74,7 +74,8 @@ fn up_handles_401_then_refreshes_then_succeeds() {
         &[("STEADYSTATE_BACKEND", url)],
         &["up", "https://github.com/x/y"],
     );
-    
+    eprintln!("STDERR: {}", String::from_utf8_lossy(&out.stderr));
+    eprintln!("STDOUT: {}", String::from_utf8_lossy(&out.stdout))
     // Assert that all mocks were called as expected
     mock_sessions_1.assert();
     mock_refresh.assert();
