@@ -119,6 +119,69 @@ mod tests {
         }
     }
 
+#[tokio::test]
+async fn test_is_near_expiry_true_when_within_buffer() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let exp = now + 30; // expires in 30 seconds
+    let session = Session {
+        login: "u".into(),
+        jwt: "t".into(),
+        jwt_exp: Some(exp),
+    };
+
+    assert!(session.is_near_expiry(60)); // buffer 60s → should return true
+}
+
+#[tokio::test]
+async fn test_is_near_expiry_false_when_outside_buffer() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let exp = now + 300; // expires in 5 minutes
+    let session = Session {
+        login: "u".into(),
+        jwt: "t".into(),
+        jwt_exp: Some(exp),
+    };
+
+    assert!(!session.is_near_expiry(60)); // buffer 60s → should return false
+}
+
+#[tokio::test]
+async fn test_is_near_expiry_none_expiry_means_false() {
+    let session = Session {
+        login: "u".into(),
+        jwt: "t".into(),
+        jwt_exp: None,
+    };
+
+    assert!(!session.is_near_expiry(60));
+}
+
+#[tokio::test]
+async fn test_is_near_expiry_exact_boundary() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let exp = now + 60;
+    let session = Session {
+        login: "u".into(),
+        jwt: "t".into(),
+        jwt_exp: Some(exp),
+    };
+
+    // Expiration equals now + buffer → treat as near expiry
+    assert!(session.is_near_expiry(60));
+}
+
     #[tokio::test]
     async fn test_write_read_cycle() {
         let ctx = TestContext::new();
