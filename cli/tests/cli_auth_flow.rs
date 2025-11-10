@@ -36,7 +36,6 @@ fn run_cli(path: Option<&TempDir>, envs: &[(&str, String)], args: &[&str]) -> Ou
 fn up_handles_401_then_refreshes_then_succeeds() {
     let td = TempDir::new().unwrap();
 
-    // Use the hidden CLI command to set up the keychain.
     let setup = run_cli(None, &[], &["test-setup-keychain", "me", "MY_REFRESH_TOKEN"]);
     assert!(setup.status.success(), "Failed to set up keychain for test. Stderr: {}", String::from_utf8_lossy(&setup.stderr));
 
@@ -45,19 +44,24 @@ fn up_handles_401_then_refreshes_then_succeeds() {
     let mut server = Server::new();
     let url = server.url();
 
+    // Mock the initial request that gets a 401
     let mock_sessions_1 = server.mock("POST", "/sessions")
         .with_status(401)
         .match_header("Authorization", "Bearer OLD_JWT")
         .expect(1)
         .create();
 
+    // Mock the refresh request
     let mock_refresh = server.mock("POST", "/auth/refresh")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"jwt":"NEW_JWT"}"#)
+        // FIX: Use a JSON matcher to be robust against whitespace/ordering.
+        .match_body(Matcher::JsonString(r#"{"refresh_token":"MY_REFRESH_TOKEN"}"#.to_string()))
         .expect(1)
         .create();
 
+    // Mock the retried request
     let mock_sessions_2 = server.mock("POST", "/sessions")
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -94,13 +98,17 @@ fn up_forces_refresh_when_jwt_expired() {
     let mut server = Server::new();
     let url = server.url();
 
+    // Mock the proactive refresh request
     let mock_refresh = server.mock("POST", "/auth/refresh")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"jwt":"FRESH"}"#)
+        // FIX: Use a JSON matcher here as well for consistency.
+        .match_body(Matcher::JsonString(r#"{"refresh_token":"MY_REFRESH_TOKEN"}"#.to_string()))
         .expect(1)
         .create();
 
+    // Mock the original /sessions request, now with the fresh token
     let mock_sessions = server.mock("POST", "/sessions")
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -135,6 +143,7 @@ fn logout_removes_session_and_revokes_refresh() {
     let mut server = Server::new();
     let url = server.url();
 
+    // Mock the revoke endpoint
     let mock_revoke = server.mock("POST", "/auth/revoke")
         .with_status(204)
         .match_body(Matcher::JsonString(r#"{"refresh_token":"MY_REFRESH_TOKEN"}"#.to_string()))
