@@ -15,8 +15,8 @@ use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 use auth::{
-    UpResponse, delete_refresh_token, device_login, get_refresh_token, perform_refresh,
-    request_with_auth,
+    delete_refresh_token, device_login, get_refresh_token, perform_refresh, request_with_auth,
+    UpResponse,
 };
 use config::{BACKEND_URL, CLI_VERSION, HTTP_TIMEOUT_SECS, USER_AGENT};
 use session::{read_session, remove_session};
@@ -57,7 +57,8 @@ enum Commands {
         /// Output in JSON format
         #[arg(long)]
         json: bool,
-    }
+    }, // <-- FIX: Added missing comma
+
     /// (For integration testing only) Stores a token in the keychain.
     #[command(hide = true)]
     TestSetupKeychain {
@@ -250,19 +251,15 @@ async fn main() -> Result<()> {
         }
         Commands::Up { repo, json } => {
             if let Err(e) = up(&client, repo, json).await {
-                // Removed the stray period
                 error!("up failed: {:#}", e);
                 std::process::exit(1);
             }
         }
         Commands::TestSetupKeychain { username, token } => {
-            // This is a hidden command for integration testing only
             auth::store_refresh_token(&username, &token).await?;
-            // Optional: print a confirmation for easier debugging
-            // println!("Test token stored for user '{}'.", username);
         }
     }
-    }
+    // <-- FIX: Removed the extra closing brace here.
 
     Ok(())
 }
