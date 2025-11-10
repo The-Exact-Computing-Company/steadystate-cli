@@ -686,4 +686,83 @@ mod tests {
         // Clean up
         let _ = crate::session::remove_session(Some(&ctx.path)).await;
     }
+    #[tokio::test]
+    async fn test_request_with_auth_handles_401_and_refreshes() {
+    use mockito::Server;
+    
+    let ctx = TestContext::new();
+    let username = "test_user";
+    let old_jwt = "OLD_JWT";
+    let new_jwt = "NEW_JWT";
+    let refresh_token = "REFRESH_TOKEN";
+
+    // Set up session with old JWT
+    let session = Session::new(username.to_string(), old_jwt.to_string());
+    write_session(&session, Some(&ctx.path))
+        .await
+        .expect("write session");
+
+    // Store refresh token in keychain
+    store_refresh_token(username, refresh_token)
+        .await
+        .expect("store refresh token");
+
+    // Create mock server
+    let mut server = Server::new();
+    
+    // Override BACKEND_URL for this test
+    std::env::set_var("STEADYSTATE_BACKEND", server.url());
+
+    // Mock initial request that returns 401
+    let mock_request_401 = server
+        .mock("POST", "/test-endpoint")
+        .match_header("Authorization", format!("Bearer {}", old_jwt).as_str())
+        .with_status(401)
+        .expect(1)
+        .create();
+
+    // Mock refresh endpoint
+    let mock_refresh = server
+        .mock("POST", "/auth/refresh")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(r#"{{"jwt":"{}"}}"#, new_jwt))
+        .expect(1)
+        .create();
+
+    // Mock retry request with new JWT
+    let mock_request_success = server
+        .mock("POST", "/test-endpoint")
+        .match_header("Authorization", format!("Bearer {}", new_jwt).as_str())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"result":"success"}"#)
+        .expect(1)
+        .create();
+
+    // Create client and make authenticated request
+    let client = Client::new();
+    let result: serde_json::Value = request_with_auth(
+        &client,
+        |c, jwt| {
+            c.post(format!("{}/test-endpoint", server.url()))
+                .bearer_auth(jwt)
+        },
+        Some(&ctx.path),
+    )
+    .await
+    .expect("request should succeed after refresh");
+
+    // Verify all mocks were called
+    mock_request_401.assert();
+    mock_refresh.assert();
+    mock_request_success.assert();
+
+    // Verify response
+    assert_eq!(result.get("result").and_then(|v| v.as_str()), Some("success"));
+
+    // Clean up
+    delete_refresh_token(username).await.expect("cleanup");
+    std::env::remove_var("STEADYSTATE_BACKEND");
+}
 }
