@@ -57,7 +57,7 @@ enum Commands {
         /// Output in JSON format
         #[arg(long)]
         json: bool,
-    }, // <-- FIX: Added missing comma
+    },
 
     /// (For integration testing only) Stores a token in the keychain.
     #[command(hide = true)]
@@ -215,6 +215,8 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Reverted to the simple, correct client builder.
+    // The pool_max_idle_per_host workaround is no longer needed with mockito.
     let client = Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -259,7 +261,6 @@ async fn main() -> Result<()> {
             auth::store_refresh_token(&username, &token).await?;
         }
     }
-    // <-- FIX: Removed the extra closing brace here.
 
     Ok(())
 }
