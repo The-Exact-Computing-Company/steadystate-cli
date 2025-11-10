@@ -1,4 +1,3 @@
-use once_cell::sync::Lazy;
 
 pub const SERVICE_NAME: &str = "steadystate";
 
