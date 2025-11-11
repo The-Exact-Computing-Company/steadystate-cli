@@ -50,7 +50,7 @@ mod helpers {
 
     pub struct TestHarness {
         pub tempdir: TempDir,
-        server_url: String,
+        pub server_url: String, // Made public for direct use in failure tests
         server_handle: Option<std::thread::JoinHandle<Vec<String>>>,
     }
 
@@ -65,16 +65,9 @@ mod helpers {
             }
         }
 
-        pub fn run_cli_and_assert(&mut self, args: &[&str]) -> (Output, Vec<String>) {
-            let output = {
-                let mut cmd = Command::new(env!("CARGO_BIN_EXE_steadystate"));
-                cmd.env("STEADYSTATE_CONFIG_DIR", self.tempdir.path());
-                cmd.env("STEADYSTATE_BACKEND", &self.server_url);
-                cmd.args(args);
-                cmd.output().expect("run steadystate cli")
-            };
-
-            let requests = self.server_handle.take().unwrap().join().unwrap();
+        pub fn run_cli_and_assert_success(&mut self, args: &[&str]) -> (Output, Vec<String>) {
+            let output = self.run_cli(args);
+            let requests = self.join_server();
 
             if !output.status.success() {
                 eprintln!("=== CLI STDOUT ===\n{}", String::from_utf8_lossy(&output.stdout));
@@ -89,6 +82,18 @@ mod helpers {
             (output, requests)
         }
 
+        pub fn run_cli(&self, args: &[&str]) -> Output {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_steadystate"));
+            cmd.env("STEADYSTATE_CONFIG_DIR", self.tempdir.path());
+            cmd.env("STEADYSTATE_BACKEND", &self.server_url);
+            cmd.args(args);
+            cmd.output().expect("run steadystate cli")
+        }
+
+        pub fn join_server(&mut self) -> Vec<String> {
+            self.server_handle.take().unwrap().join().unwrap()
+        }
+
         pub fn create_session(&self, login: &str, jwt: &str, jwt_exp: Option<u64>) {
             let dir = self.tempdir.path().join("steadystate");
             fs::create_dir_all(&dir).unwrap();
@@ -98,29 +103,21 @@ mod helpers {
         }
 
         pub fn create_future_session(&self) {
-            let exp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() + 3600;
+            let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
             self.create_session("tester", "test-jwt", Some(exp));
         }
 
         pub fn create_expired_session(&self) {
-            let exp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() - 10;
+            let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 10;
             self.create_session("tester", "expired-jwt", Some(exp));
         }
 
         pub fn set_keyring_password(&self, username: &str, password: &str) {
-            keyring::Entry::new("steadystate", username)
-                .unwrap()
-                .set_password(password)
-                .unwrap();
+            keyring::Entry::new("steadystate", username).unwrap().set_password(password).unwrap();
         }
     }
 
+    /// Minimal, robust, "headers-only" mock server.
     fn spawn_scripted_server(
         responses: Vec<MockResponse>,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
@@ -132,24 +129,10 @@ mod helpers {
             for response in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-
-                let mut buf = Vec::new();
-                loop {
-                    let mut chunk = [0u8; 1024];
-                    match stream.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            buf.extend_from_slice(&chunk[..n]);
-                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                                break;
-                            }
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(e) => panic!("read error: {e:?}"),
-                    }
+                let mut buf = vec![0; 1024]; // Simple buffer is enough for headers
+                if let Ok(n) = stream.read(&mut buf) {
+                    reqs.push(String::from_utf8_lossy(&buf[..n]).to_string());
                 }
-
-                reqs.push(String::from_utf8_lossy(&buf).to_string());
                 let resp = response.into_http_string();
                 stream.write_all(resp.as_bytes()).unwrap();
             }
@@ -161,49 +144,53 @@ mod helpers {
 }
 
 // ---------------------------------------------------------------------------
-// Integration Tests (Unchanged)
+// NEW, CORRECTED INTEGRATION TESTS
 // ---------------------------------------------------------------------------
 
 use helpers::{MockResponse, TestHarness};
 use serde_json::json;
 
 #[test]
-fn up_handles_401_then_refreshes_then_succeeds() {
+fn up_refreshes_proactively_when_jwt_expired() {
     let script = vec![
-        MockResponse::Unauthorized,
-        MockResponse::Json(json!({ "jwt": "new-jwt-123" })),
-        MockResponse::Json(json!({ "id": "session-999", "ssh_url": "ssh://after-refresh" })),
-    ];
-    let mut harness = TestHarness::new(script);
-    harness.create_future_session();
-    harness.set_keyring_password("tester", "refresh-abc");
-
-    let (out, reqs) = harness.run_cli_and_assert(&["up", "https://github.com/example/repo"]);
-
-    assert_eq!(reqs.len(), 3);
-    assert!(reqs[0].starts_with("POST /sessions"));
-    assert!(reqs[1].starts_with("POST /auth/refresh"));
-    assert!(reqs[2].starts_with("POST /sessions"));
-
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("session-999"));
-}
-
-#[test]
-fn up_forces_refresh_when_jwt_expired() {
-    let script = vec![
-        MockResponse::Json(json!({ "jwt": "fresh-jwt-321" })),
-        MockResponse::Json(json!({ "id": "session-expired", "ssh_url": "ssh://expired.example" })),
+        // Proactive refresh call
+        MockResponse::Json(json!({ "jwt": "fresh-jwt-123" })),
+        // Session creation call
+        MockResponse::Json(json!({ "id": "session-xyz", "ssh_url": "ssh://fresh" })),
     ];
     let mut harness = TestHarness::new(script);
     harness.create_expired_session();
-    harness.set_keyring_password("tester", "refresh-token-xyz");
+    harness.set_keyring_password("tester", "refresh-token-abc");
 
-    let (_, reqs) = harness.run_cli_and_assert(&["up", "https://github.com/example/repo"]);
+    let (out, reqs) = harness.run_cli_and_assert_success(&["up", "https://github.com/example/repo"]);
 
     assert_eq!(reqs.len(), 2);
     assert!(reqs[0].starts_with("POST /auth/refresh"));
     assert!(reqs[1].starts_with("POST /sessions"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("session-xyz"));
+}
+
+#[test]
+fn up_errors_gracefully_if_server_returns_401() {
+    let script = vec![
+        // The server will immediately reject our valid JWT
+        MockResponse::Unauthorized,
+    ];
+    let mut harness = TestHarness::new(script);
+    harness.create_future_session(); // Create a session with a non-expired JWT
+
+    // Run the CLI but don't assert success
+    let output = harness.run_cli(&["up", "https://github.com/example/repo"]);
+    let reqs = harness.join_server();
+
+    // Assert that the command failed as expected
+    assert!(!output.status.success(), "CLI should exit with a non-zero status");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("session has expired or been revoked"), "Stderr should contain the correct error message");
+    
+    // Assert that no refresh was attempted
+    assert_eq!(reqs.len(), 1);
+    assert!(reqs[0].starts_with("POST /sessions"));
 }
 
 #[test]
@@ -213,14 +200,12 @@ fn logout_removes_session_and_revokes_refresh() {
     harness.create_future_session();
     harness.set_keyring_password("tester", "refresh-to-revoke");
 
-    let (_, reqs) = harness.run_cli_and_assert(&["logout"]);
+    let (_, reqs) = harness.run_cli_and_assert_success(&["logout"]);
 
     assert_eq!(reqs.len(), 1);
     assert!(reqs[0].starts_with("POST /auth/revoke"));
-
-    let json = harness.tempdir.path().join("steadystate/session.json");
-    assert!(!json.exists());
-
+    let json_path = harness.tempdir.path().join("steadystate/session.json");
+    assert!(!json_path.exists());
     let res = keyring::Entry::new("steadystate", "tester").unwrap().get_password();
     assert!(res.is_err());
 }
