@@ -263,7 +263,7 @@ async fn main() -> Result<()> {
         }
         Commands::Up { repo, json } => {
             if let Err(e) = up(&client, repo, json).await {
-                error!("up failed: {:#}", e);
+                eprintln!("up failed: {:#}", e);
                 std::process::exit(1);
             }
         }
