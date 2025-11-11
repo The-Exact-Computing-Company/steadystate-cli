@@ -6,25 +6,19 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 // Using a module to encapsulate all the test infrastructure.
-// The tests themselves remain clean and at the top level.
 mod helpers {
     use super::*;
     use serde_json::json;
+    use std::net::TcpStream;
 
-    /// Defines the possible scripted responses from the mock server.
-    /// This makes test scripts more readable and less error-prone.
+    /// Scripted responses from the mock server.
     pub enum MockResponse {
-        /// Responds with HTTP 200 OK and a JSON body.
         Json(serde_json::Value),
-        /// Responds with HTTP 401 Unauthorized.
         Unauthorized,
-        /// Responds with a generic HTTP 200 OK and no body.
         Ok,
     }
 
     impl MockResponse {
-        /// Converts the enum variant into a full HTTP response string.
-        /// Crucially, it ensures `Connection: close` is always present to prevent flaky tests.
         fn into_http_string(self) -> String {
             match self {
                 MockResponse::Json(val) => {
@@ -36,7 +30,8 @@ mod helpers {
                     )
                 }
                 MockResponse::Unauthorized => {
-                    "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_string()
+                    "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                        .to_string()
                 }
                 MockResponse::Ok => {
                     "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_string()
@@ -45,7 +40,7 @@ mod helpers {
         }
     }
 
-    /// Manages the entire environment for a single integration test run.
+    /// Manages the environment for one integration test.
     pub struct TestHarness {
         pub tempdir: TempDir,
         server_url: String,
@@ -53,7 +48,6 @@ mod helpers {
     }
 
     impl TestHarness {
-        /// Creates a new test harness, spinning up a mock server with the given script.
         pub fn new(script: Vec<MockResponse>) -> Self {
             let tempdir = TempDir::new().expect("create tempdir");
             let (server_url, server_handle) = spawn_scripted_server(script);
@@ -64,11 +58,7 @@ mod helpers {
             }
         }
 
-        /// Runs the CLI with the given arguments, automatically setting the required
-        /// environment variables.
-        ///
-        /// On success, it returns the process output and a vec of requests the server received.
-        /// On failure, it panics with detailed output from the CLI and the server.
+        /// Run CLI once; returns output and captured requests.
         pub fn run_cli_and_assert(&mut self, args: &[&str]) -> (Output, Vec<String>) {
             let output = {
                 let mut cmd = Command::new(env!("CARGO_BIN_EXE_steadystate"));
@@ -78,8 +68,6 @@ mod helpers {
                 cmd.output().expect("run steadystate cli")
             };
 
-            // Take the handle from the Option so we can join it. The harness can no
-            // longer be used to run a *second* command, which is fine.
             let requests = self.server_handle.take().unwrap().join().unwrap();
 
             if !output.status.success() {
@@ -95,7 +83,6 @@ mod helpers {
             (output, requests)
         }
 
-        /// Helper to write a session.json file within the test's temp directory.
         pub fn create_session(&self, login: &str, jwt: &str, jwt_exp: Option<u64>) {
             let service_dir = self.tempdir.path().join("steadystate");
             fs::create_dir_all(&service_dir).expect("create service dir");
@@ -105,7 +92,6 @@ mod helpers {
                 .expect("write session file");
         }
 
-        /// Helper to create a session file with a valid (future) expiry.
         pub fn create_future_session(&self) {
             let future = std::time::SystemTime::now()
                 .checked_add(Duration::from_secs(3600))
@@ -116,7 +102,6 @@ mod helpers {
             self.create_session("tester", "test-jwt", Some(future));
         }
 
-        /// Helper to create a session file with an expired JWT.
         pub fn create_expired_session(&self) {
             let expired = std::time::SystemTime::now()
                 .checked_sub(Duration::from_secs(10))
@@ -127,7 +112,6 @@ mod helpers {
             self.create_session("tester", "expired-jwt", Some(expired));
         }
 
-        /// Helper to set a password in the keyring for the given user.
         pub fn set_keyring_password(&self, username: &str, password: &str) {
             keyring::Entry::new("steadystate", username)
                 .unwrap()
@@ -136,7 +120,7 @@ mod helpers {
         }
     }
 
-    /// Spawns a simple TCP server that serves a predefined sequence of responses.
+    /// Spawn a scripted HTTP/1.1 server that handles `Expect: 100-continue`.
     fn spawn_scripted_server(
         responses: Vec<MockResponse>,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
@@ -145,38 +129,104 @@ mod helpers {
 
         let handle = std::thread::spawn(move || {
             let mut requests = Vec::new();
+
             for response in responses {
                 let (mut stream, _) = listener.accept().expect("accept connection");
-                let mut buffer = Vec::new();
+                // Avoid infinite hangs in CI
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
-                // Simple loop to read a full HTTP request based on Content-Length.
-                loop {
-                    let mut chunk = [0u8; 1024];
-                    let n = stream.read(&mut chunk).unwrap();
-                    if n == 0 { break; }
-                    buffer.extend_from_slice(&chunk[..n]);
-                    if full_request_length(&buffer).is_some() { break; }
+                // 1) read headers
+                let (raw_request, content_length, expect_continue) =
+                    read_headers_return_len_and_expect(&mut stream).expect("read headers");
+
+                requests.push(raw_request.clone());
+
+                // 2) If Expect: 100-continue, send interim response now
+                if expect_continue {
+                    let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
                 }
 
-                requests.push(String::from_utf8_lossy(&buffer).to_string());
-                stream.write_all(response.into_http_string().as_bytes()).unwrap();
+                // 3) read exactly content_length bytes of body (if any)
+                if content_length > 0 {
+                    read_exact_body(&mut stream, content_length).expect("read body");
+                }
+
+                // 4) write the scripted final response
+                let reply = response.into_http_string();
+                stream.write_all(reply.as_bytes()).unwrap();
+
+                // 5) Close this connection (Connection: close semantics)
+                let _ = stream.shutdown(std::net::Shutdown::Both);
             }
+
             requests
         });
 
         (format!("http://{}", addr), handle)
     }
 
-    /// Utility to find the total length of an HTTP request in a buffer.
-    fn full_request_length(buffer: &[u8]) -> Option<usize> {
-        let end = buffer.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
-        let headers_str = std::str::from_utf8(&buffer[..end]).ok()?;
-        let content_length = headers_str
-            .lines()
-            .find_map(|line| line.to_lowercase().strip_prefix("content-length:")?.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        let total = end + content_length;
-        if buffer.len() >= total { Some(total) } else { None }
+    /// Read until CRLFCRLF; parse Content-Length and Expect headers.
+    fn read_headers_return_len_and_expect(
+        stream: &mut TcpStream,
+    ) -> std::io::Result<(String, usize, bool)> {
+        let mut buffer = Vec::new();
+        loop {
+            let mut chunk = [0u8; 1024];
+            let n = stream.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..n]);
+            if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let header_end = buffer
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no header end"))?;
+        let headers_bytes = &buffer[..header_end + 4];
+        let headers_str = std::str::from_utf8(headers_bytes)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "utf8"))?;
+
+        let mut content_length = 0usize;
+        let mut expect_continue = false;
+
+        for line in headers_str.lines() {
+            if let Some((name, value)) = line.split_once(':') {
+                let name = name.trim();
+                let value = value.trim();
+                if name.eq_ignore_ascii_case("Content-Length") {
+                    if let Ok(v) = value.parse::<usize>() {
+                        content_length = v;
+                    }
+                } else if name.eq_ignore_ascii_case("Expect") {
+                    if value.eq_ignore_ascii_case("100-continue") {
+                        expect_continue = true;
+                    }
+                }
+            }
+        }
+
+        Ok((String::from_utf8_lossy(headers_bytes).to_string(), content_length, expect_continue))
+    }
+
+    fn read_exact_body(stream: &mut TcpStream, len: usize) -> std::io::Result<()> {
+        let mut remaining = len;
+        let mut buf = [0u8; 4096];
+        while remaining > 0 {
+            let to_read = remaining.min(buf.len());
+            let n = stream.read(&mut buf[..to_read])?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "eof while reading body",
+                ));
+            }
+            remaining -= n;
+        }
+        Ok(())
     }
 }
 
@@ -190,8 +240,11 @@ use serde_json::json;
 #[test]
 fn up_handles_401_then_refreshes_then_succeeds() {
     let script = vec![
+        // 1) First POST /sessions => 401 triggers refresh
         MockResponse::Unauthorized,
+        // 2) POST /auth/refresh => 200 with new jwt
         MockResponse::Json(json!({ "jwt": "new-jwt-123" })),
+        // 3) Second POST /sessions => 200 success
         MockResponse::Json(json!({ "id": "session-999", "ssh_url": "ssh://after-refresh" })),
     ];
     let mut harness = TestHarness::new(script);
@@ -238,7 +291,7 @@ fn logout_removes_session_and_revokes_refresh() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].starts_with("POST /auth/revoke"));
 
-    // Session file removed - this now compiles correctly
+    // Session file removed
     let session_path = harness.tempdir.path().join("steadystate/session.json");
     assert!(!session_path.exists(), "Session file was not removed");
 
