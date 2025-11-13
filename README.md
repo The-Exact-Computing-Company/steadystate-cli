@@ -1,6 +1,6 @@
 # SteadyState
 
-**SteadyState** is a platform for creating **reproducible**, **ephemeral**, and
+**SteadyState** is a set of free software tools for creating **reproducible**, **ephemeral**, and
 **collaborative** development environments directly from Git repositories. It
 consists of two main components:
 
