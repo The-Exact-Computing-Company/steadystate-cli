@@ -405,7 +405,7 @@ mod tests {
         let result = perform_refresh(&client, None).await;
         assert!(result.is_err());
         let err_msg = format!("{:#}", result.unwrap_err());
-        assert!(err_msg.contains("No active session found"));
+        assert!(err_msg.contains("No active session found. Run 'steadystate login' first."));
     }
 
     #[tokio::test]
