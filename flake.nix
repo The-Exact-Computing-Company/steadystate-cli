@@ -82,6 +82,9 @@
             echo "⚠️ No backend/.env found"
           fi
 
+          # IMPORTANT: CLI must talk HTTP, not HTTPS
+          export STEADYSTATE_BACKEND=http://localhost:8080
+
           echo "🚀 Launching backend in new terminal"
           ${terminal} -e sh -c "${backend}/bin/steadystate-backend; exec bash" &
 
