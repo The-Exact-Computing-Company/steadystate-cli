@@ -24,7 +24,7 @@ jobs:
           export ENABLE_FAKE_AUTH=1
           export JWT_SECRET=test-secret
           export PORT=8080
-          # Use the predictable symlink for the backend
+          
           result-backend/bin/steadystate-backend &
           BACKEND_PID=$!
           sleep 2 # Give the server a moment to start
@@ -33,7 +33,6 @@ jobs:
       - name: Test fake login
         run: |
           export STEADYSTATE_BACKEND=http://localhost:8080
-          # Use the predictable symlink for the CLI
           result-cli/bin/steadystate login --provider fake
           
           # Check human-readable output
@@ -47,4 +46,4 @@ jobs:
         if: always()
         run: |
           echo "Stopping backend process (PID: $BACKEND_PID)..."
-          kill $BACKEND_PID || true 
+          kill $BACKEND_PID || true
