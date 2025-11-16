@@ -1,0 +1,50 @@
+name: CI Login Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-fake-auth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      
+      - uses: cachix/install-nix-action@v31
+      
+      - name: Build workspace
+        run: |
+          export CARGO_BUILD_JOBS=1
+          export RUSTFLAGS="-C debuginfo=0 -C opt-level=0" 
+          nix build .#backend .#cli
+      
+      - name: Start backend with fake auth
+        run: |
+          export ENABLE_FAKE_AUTH=1
+          export JWT_SECRET=test-secret
+          export PORT=8080
+          result/bin/steadystate-backend &
+          BACKEND_PID=$!
+          sleep 2
+          echo "BACKEND_PID=$BACKEND_PID" >> $GITHUB_ENV
+      
+      - name: Test fake login
+        run: |
+          export STEADYSTATE_BACKEND=http://localhost:8080
+          # The fake provider doesn't actually open a browser or wait, so this should be near-instantaneous
+          result/bin/steadystate login --provider fake
+          
+          # Check human-readable output
+          result/bin/steadystate whoami | grep "Logged in as: ci-test-user"
+
+          # Check machine-readable output and verify login status
+          result/bin/steadystate whoami --json | jq -e '.logged_in == true'
+          result/bin/steadystate whoami --json | jq -e '.login == "ci-test-user"'
+      
+      - name: Cleanup Backend
+        if: always()
+        run: |
+          echo "Stopping backend process (PID: $BACKEND_PID)..."
+          kill $BACKEND_PID || true 
