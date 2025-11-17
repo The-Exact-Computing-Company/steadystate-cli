@@ -11,10 +11,15 @@ use steadystate_backend::state::AppState;
 
 /// Helper to create a router backed by a test-configured AppState.
 async fn setup_router() -> Router {
-    std::env::set_var("JWT_SECRET", "api-test-secret");
-    std::env::set_var("ENABLE_FAKE_AUTH", "1");
-    std::env::remove_var("GITHUB_CLIENT_ID");
-    std::env::remove_var("GITHUB_CLIENT_SECRET");
+    // Setting environment variables is an unsafe operation because it affects
+    // the global state of the process and can cause data races if tests run in parallel.
+    // We acknowledge this risk by using an unsafe block.
+    unsafe {
+        std::env::set_var("JWT_SECRET", "api-test-secret");
+        std::env::set_var("ENABLE_FAKE_AUTH", "1");
+        std::env::remove_var("GITHUB_CLIENT_ID");
+        std::env::remove_var("GITHUB_CLIENT_SECRET");
+    }
 
     let state = AppState::try_new().await.unwrap();
     // This now correctly builds the router with the /auth prefix and all layers.
