@@ -67,4 +67,4 @@ impl AuthProviderFactory for FakeFactory {
         }
         Ok(FakeAuth::new())
     }
-}
+} 
