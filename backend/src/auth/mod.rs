@@ -14,6 +14,6 @@ use crate::state::AppState;
 pub fn register_builtin_providers(state: &AppState) {
     state.register_provider_factory(Arc::new(github::GitHubFactory));
     state.register_provider_factory(Arc::new(fake::FakeFactory));
-    // When GitLab is implemented, add its factory here:
-    // state.register_provider_factory(Arc::new(gitlab::GitLabFactory));
+    state.register_provider_factory(Arc::new(gitlab::GitLabFactory));
+    state.register_provider_factory(Arc::new(orchid::OrchidFactory));
 }
