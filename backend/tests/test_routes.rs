@@ -4,7 +4,7 @@ use axum::{body::Body, http::{Request, StatusCode}, Router};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tower::ServiceExt; // <-- THIS IS THE CRITICAL LINE THAT FIXES THE ERROR
+use tower::ServiceExt;
 
 use steadystate_backend::app_router;
 use steadystate_backend::state::AppState;
@@ -22,7 +22,6 @@ async fn setup_router() -> Router {
     }
 
     let state = AppState::try_new().await.unwrap();
-    // This now correctly builds the router with the /auth prefix and all layers.
     app_router(state)
 }
 
@@ -119,7 +118,6 @@ async fn test_me_route_success() {
 #[tokio::test]
 async fn test_me_route_fails_for_expired_token() {
     let app = setup_router().await;
-    // Create a new JWT key with 0 TTL to make an instantly-expired token
     let expired_keys = steadystate_backend::jwt::JwtKeys::new("api-test-secret", "steadystate", 0);
     let token = expired_keys.sign("test-user", "fake").unwrap();
 
@@ -140,7 +138,6 @@ async fn test_me_route_fails_for_expired_token() {
 #[tokio::test]
 async fn test_me_route_fails_for_wrong_secret() {
     let app = setup_router().await;
-    // Token signed with a different secret
     let other_keys = steadystate_backend::jwt::JwtKeys::new("a-different-secret", "steadystate", 60);
     let token = other_keys.sign("test-user", "fake").unwrap();
     
@@ -160,12 +157,16 @@ async fn test_me_route_fails_for_wrong_secret() {
 
 #[tokio::test]
 async fn test_me_route_fails_for_malformed_header() {
-    let app = setup_router().await;
-    let state = app.layer_state::<Arc<AppState>>().unwrap().clone();
-    let token = state.jwt.sign("test-user", "fake").unwrap();
+    // Generate the token once in its own scope.
+    let token = {
+        let app = setup_router().await;
+        let state = app.layer_state::<Arc<AppState>>().unwrap().clone();
+        state.jwt.sign("test-user", "fake").unwrap()
+    };
 
-    // Test case 1: "Bearer" prefix is missing
-    let response1 = app.clone().oneshot(
+    // Test case 1: "Bearer" prefix is missing. Create a new router instance.
+    let app1 = setup_router().await;
+    let response1 = app1.oneshot(
         Request::builder()
             .uri("/auth/me")
             .header("Authorization", token.clone()) // No "Bearer "
@@ -174,8 +175,9 @@ async fn test_me_route_fails_for_malformed_header() {
     ).await.unwrap();
     assert_eq!(response1.status(), StatusCode::BAD_REQUEST);
 
-    // Test case 2: No Authorization header at all
-    let response2 = app.oneshot(
+    // Test case 2: No Authorization header at all. Create another new router instance.
+    let app2 = setup_router().await;
+    let response2 = app2.oneshot(
         Request::builder()
             .uri("/auth/me")
             .body(Body::empty())
