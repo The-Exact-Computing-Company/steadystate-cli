@@ -4,10 +4,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::auth::provider::{
-    AuthProvider, AuthProviderFactory, AuthProviderFactoryDyn, DevicePollOutcome, UserIdentity,
+    AuthProvider, AuthProviderDyn, AuthProviderFactory, DevicePollOutcome, UserIdentity,
 };
 use crate::models::{DeviceStartResponse, ProviderId};
 use crate::state::AppState;
@@ -160,4 +160,4 @@ struct GhUser {
     login: String,
     id: u64,
     email: Option<String>,
-}
+} 
