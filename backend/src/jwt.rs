@@ -1,4 +1,4 @@
-// src/jwt.rs
+// backend/src/jwt.rs
 
 use anyhow::{anyhow, Result};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
@@ -82,16 +82,26 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_fails_on_immediately_expired_token() {
-        // Use a zero-second TTL to create an instantly expired token.
-        let keys = JwtKeys::new(TEST_SECRET, TEST_ISSUER, 0);
-        let token = keys.sign("test-user", "fake").unwrap();
+    fn test_verify_fails_on_already_expired_token() {
+        let keys = JwtKeys::new(TEST_SECRET, TEST_ISSUER, 60); // TTL doesn't matter here
 
+        // Create claims that expired 1 hour ago. This is deterministic.
+        let one_hour_ago = (now() - 3600) as usize;
+        let expired_claims = Claims {
+            sub: "test-user".into(),
+            iss: TEST_ISSUER.into(),
+            exp: one_hour_ago,
+            provider: "fake".into(),
+        };
+
+        // Manually sign the claims that are already expired.
+        let token = encode(&Header::default(), &expired_claims, &keys.encoding).unwrap();
+
+        // Verification must fail because the token is expired.
         let result = keys.verify(&token);
-        assert!(result.is_err());
+        assert!(result.is_err(), "Verification should fail for an expired token");
         let err_msg = result.unwrap_err().to_string();
-        // Assert on the error type, which is more stable than the full message.
-        assert!(err_msg.contains("ExpiredSignature"));
+        assert!(err_msg.contains("ExpiredSignature"), "Error should be ExpiredSignature");
     }
 
     #[test]
@@ -125,4 +135,4 @@ mod tests {
         // The signature will no longer match the header + tampered payload.
         assert!(err_msg.contains("InvalidSignature"));
     }
-}
+} 
