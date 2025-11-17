@@ -14,12 +14,14 @@ use crate::state::AppState;
 
 // --- Provider Implementation ---
 
+#[derive(Debug)] // <-- ADDED THIS LINE
 pub struct GitHubAuth {
     pub client_id: String,
     pub client_secret: String,
     pub http: Client,
 }
 
+// ... (rest of the file is unchanged) ...
 impl GitHubAuth {
     pub fn new(http: Client, client_id: String, client_secret: String) -> Arc<Self> {
         Arc::new(Self {
@@ -147,13 +149,13 @@ enum DeviceTokenOut {
     Ok {
         access_token: String,
         #[serde(rename = "token_type")]
-        _token_type: String, // Field is unused, silenced with _
-        _scope: String,      // Field is unused, silenced with _
+        _token_type: String,
+        _scope: String,
     },
     Err {
         error: String,
         #[serde(rename = "error_description")]
-        _error_description: Option<String>, // Field is unused, silenced with _
+        _error_description: Option<String>,
     },
 }
 
