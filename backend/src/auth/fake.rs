@@ -12,8 +12,10 @@ use crate::state::AppState;
 
 // --- Provider Implementation ---
 
+#[derive(Debug)] // <-- ADDED THIS LINE
 pub struct FakeAuth;
 
+// ... (rest of the file is unchanged) ...
 impl FakeAuth {
     pub fn new() -> Arc<Self> {
         Arc::new(Self)
@@ -45,7 +47,6 @@ impl AuthProvider for FakeAuth {
                 provider: "fake".into(),
             }))
         } else {
-            // For testing, just stay pending for any other code.
             Ok(DevicePollOutcome::Pending)
         }
     }
