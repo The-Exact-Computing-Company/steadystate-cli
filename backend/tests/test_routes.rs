@@ -4,7 +4,7 @@ use axum::{body::Body, http::{Request, StatusCode}, Router};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tower::ServiceExt;
+use tower::util::ServiceExt;
 
 use steadystate_backend::app_router;
 use steadystate_backend::state::AppState;
