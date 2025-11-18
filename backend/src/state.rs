@@ -125,7 +125,7 @@ impl AppState {
         self.provider_factories.insert(factory.id().to_string(), factory);
     }
 
-    pub async fn get_or_create_provider(self: &Arc<Self>, id: &ProviderId) -> Result<AuthProviderDyn> {
+    pub async fn get_or_create_provider(&self, id: &ProviderId) -> Result<AuthProviderDyn> {
         if let Some(provider) = self.providers.get(id) {
             return Ok(provider.clone());
         }
