@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use axum::{
-    async_trait,
     extract::FromRequestParts,
     http::{header, request::Parts, StatusCode},
 };
