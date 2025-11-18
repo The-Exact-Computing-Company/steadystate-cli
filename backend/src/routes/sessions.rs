@@ -1,6 +1,5 @@
 // backend/src/routes/sessions.rs
 
-use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -16,7 +15,6 @@ use crate::{
     compute::ComputeProvider,
 };
 
-// --- Updated to Router<AppState> ---
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create_session))
@@ -25,7 +23,6 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn run_provisioning(
-    // AppState is now Clone, so passing by value is cheap
     app_state: AppState,
     session_id: String,
     request: SessionRequest,
@@ -36,6 +33,7 @@ async fn run_provisioning(
         return; 
     };
 
+    // Note: .get() returns a reference. We clone the Arc<dyn ComputeProvider>.
     let provider = if let Some(p) = app_state.compute_providers.get(&provider_id) {
         p.clone()
     } else {
@@ -43,6 +41,9 @@ async fn run_provisioning(
         return;
     };
 
+    // We need to clone the provider to satisfy the borrow checker or lifetime bounds 
+    // if we were doing something more complex, but here `provider` is Arc, so it's fine.
+    
     let result = if let Some(mut session_entry) = app_state.sessions.get_mut(&session_id) {
         provider.start_session(&mut session_entry, &request).await
     } else {
@@ -85,7 +86,7 @@ async fn create_session(
     
     state.sessions.insert(session_id.clone(), session);
 
-    // Pass state clone (cheap now)
+    // state is cheap to clone now
     tokio::spawn(run_provisioning(state.clone(), session_id, request));
 
     (StatusCode::ACCEPTED, Json(session_info))
@@ -122,4 +123,4 @@ async fn terminate_session(
     } else {
         StatusCode::NOT_FOUND
     }
-} 
+}
