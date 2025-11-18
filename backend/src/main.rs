@@ -1,7 +1,6 @@
 // backend/src/main.rs
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use axum::Router;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
