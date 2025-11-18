@@ -1,5 +1,6 @@
 // backend/src/jwt.rs
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use axum::{
@@ -7,12 +8,10 @@ use axum::{
     extract::FromRequestParts,
     http::{header, request::Parts, StatusCode},
 };
-// Import the necessary items from jwt-simple
 use jwt_simple::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::state::AppState;
 
-// This struct can now be a simple wrapper around the key.
 #[derive(Clone)]
 pub struct JwtKeys {
     key: HS256Key,
@@ -20,12 +19,13 @@ pub struct JwtKeys {
     ttl_duration: Duration,
 }
 
-// The claims struct remains the same.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Claims {
+/// The custom claims specific to the SteadyState application.
+/// `jwt-simple` will handle standard claims like `iss` (issuer) and `exp` (expiration) separately.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CustomClaims {
+    /// The subject of the token (the user's login name).
     pub sub: String,
-    pub iss: String,
-    pub exp: usize,
+    /// The authentication provider used (e.g., "github").
     pub provider: String,
 }
 
@@ -38,44 +38,51 @@ impl JwtKeys {
         }
     }
 
+    /// Creates and signs a new JWT.
     pub fn sign(&self, login: &str, provider: &str) -> Result<String> {
-        let claims = Claims {
+        let custom_claims = CustomClaims {
             sub: login.to_string(),
-            iss: self.issuer.clone(),
-            // `jwt-simple` handles exp automatically via `with_duration`
-            exp: 0, 
             provider: provider.to_string(),
         };
 
-        let jwt_claims = JWTClaims::with_custom_claims(claims, self.ttl_duration);
-        self.key.authenticate(jwt_claims).map_err(|e| anyhow!("Failed to sign JWT: {}", e))
+        // Use the library's `Claims` builder to wrap our custom data and set standard claims.
+        let claims = Claims::with_custom_claims(custom_claims, self.ttl_duration)
+            .with_issuer(self.issuer.clone())
+            .with_subject(login.to_string());
+
+        self.key.authenticate(claims).map_err(|e| anyhow!("Failed to sign JWT: {}", e))
     }
 
-    pub fn verify(&self, token: &str) -> Result<Claims> {
-        // Verification options ensure we check the issuer.
+    /// Verifies a token and returns the custom claims if valid.
+    pub fn verify(&self, token: &str) -> Result<CustomClaims> {
+        let mut allowed_issuers = HashSet::new();
+        allowed_issuers.insert(self.issuer.clone());
+
         let options = VerificationOptions {
-            allowed_issuers: Some(HashSet::from_strings(&[self.issuer.as_str()])),
+            allowed_issuers: Some(allowed_issuers),
             ..Default::default()
         };
 
+        // Tell `verify_token` to expect our `CustomClaims` struct in the payload.
         let claims = self.key
-            .verify_token::<Claims>(token, Some(options))
+            .verify_token::<CustomClaims>(token, Some(options))
             .map_err(|e| anyhow!("Invalid or expired JWT: {}", e))?;
         
         Ok(claims.custom)
     }
 }
 
-// --- AXUM EXTRACTOR FOR CLAIMS (no changes needed here) ---
+// --- AXUM EXTRACTOR FOR CUSTOM CLAIMS ---
 
 #[async_trait]
-impl FromRequestParts<Arc<AppState>> for Claims {
+impl FromRequestParts<Arc<AppState>> for CustomClaims {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        // Get the Authorization header.
         let auth_header = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -84,12 +91,14 @@ impl FromRequestParts<Arc<AppState>> for Claims {
                 (StatusCode::UNAUTHORIZED, "Missing Authorization header".into())
             })?;
 
+        // Check for "Bearer " prefix and get the token.
         let token = auth_header
             .strip_prefix("Bearer ")
             .ok_or_else(|| {
                 (StatusCode::BAD_REQUEST, "Invalid token type; expected Bearer".into())
             })?;
 
+        // Verify the token and extract the custom claims.
         state
             .jwt
             .verify(token)
