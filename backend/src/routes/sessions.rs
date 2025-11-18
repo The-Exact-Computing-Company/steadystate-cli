@@ -27,12 +27,14 @@ async fn run_provisioning(
     session_id: String,
     request: SessionRequest,
 ) {
+    // 1. Retrieve the provider ID
     let provider_id = if let Some(session) = app_state.sessions.get(&session_id) {
         session.compute_provider.clone()
     } else {
         return; 
     };
 
+    // 2. Get the provider (map is now wrapped in Arc, so access is cheap)
     let provider = if let Some(p) = app_state.compute_providers.get(&provider_id) {
         p.clone()
     } else {
@@ -40,12 +42,14 @@ async fn run_provisioning(
         return;
     };
 
+    // 3. Do the work
     let result = if let Some(mut session_entry) = app_state.sessions.get_mut(&session_id) {
         provider.start_session(&mut session_entry, &request).await
     } else {
         return;
     };
 
+    // 4. Handle failure
     if let Err(e) = result {
         tracing::error!("Provisioning failed for session {}: {:#}", session_id, e);
         if let Some(mut session) = app_state.sessions.get_mut(&session_id) {
@@ -71,7 +75,8 @@ async fn create_session(
         branch: request.branch.clone(),
         environment: request.environment.clone(),
         endpoint: None,
-        compute_provider: state.default_compute_provider.clone(),
+        // FIX IS HERE: Access default_compute_provider via config
+        compute_provider: state.config.default_compute_provider.clone(),
         creator_login: claims.sub,
         created_at: now,
         updated_at: now,
@@ -82,6 +87,7 @@ async fn create_session(
     
     state.sessions.insert(session_id.clone(), session);
 
+    // state is cheap to clone now
     tokio::spawn(run_provisioning(state.clone(), session_id, request));
 
     (StatusCode::ACCEPTED, Json(session_info))
