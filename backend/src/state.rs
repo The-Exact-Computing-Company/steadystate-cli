@@ -15,10 +15,10 @@ use crate::compute::ComputeProvider;
 use crate::jwt::JwtKeys;
 use crate::models::{PendingDevice, ProviderId, RefreshRecord, Session};
 
-// --- TYPE ALIASES ---
 pub type SessionStore = DashMap<String, Session>;
 
 // --- Centralized Configuration ---
+#[derive(Clone)] // Add Clone here
 pub struct Config {
     pub enable_fake_auth: bool,
     pub github_client_id: Option<String>,
@@ -56,16 +56,35 @@ pub struct AppState {
     pub device_max_interval: u64,
     pub config: Config,
 
-    // --- AUTHENTICATION STATE ---
+    // Auth state
     pub device_pending: DashMap<String, PendingDevice>,
     pub refresh_store: DashMap<String, RefreshRecord>,
     pub providers: DashMap<ProviderId, AuthProviderDyn>,
     pub provider_factories: DashMap<String, AuthProviderFactoryDyn>,
 
-    // --- COMPUTE & SESSION STATE ---
+    // Compute & Session state
     pub sessions: SessionStore,
     pub compute_providers: HashMap<String, Arc<dyn ComputeProvider>>,
     pub default_compute_provider: String,
+}
+
+// --- ADD THIS CLONE IMPLEMENTATION ---
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            http: self.http.clone(),
+            jwt: self.jwt.clone(),
+            device_max_interval: self.device_max_interval,
+            config: self.config.clone(),
+            device_pending: self.device_pending.clone(),
+            refresh_store: self.refresh_store.clone(),
+            providers: self.providers.clone(),
+            provider_factories: self.provider_factories.clone(),
+            sessions: self.sessions.clone(),
+            compute_providers: self.compute_providers.clone(),
+            default_compute_provider: self.default_compute_provider.clone(),
+        }
+    }
 }
 
 impl AppState {
@@ -88,9 +107,6 @@ impl AppState {
 
         // --- COMPUTE PROVIDER SETUP ---
         let mut compute_providers = HashMap::<String, Arc<dyn ComputeProvider>>::new();
-
-        // Initialize and register the local provider.
-        // This path must be configured correctly for the local provider to find the noenv flake.
         let noenv_flake_path = std::env::var("NOENV_FLAKE_PATH")
             .context("NOENV_FLAKE_PATH must be set to the absolute path of the backend/flakes/noenv directory")?;
         let local_provider = Arc::new(LocalComputeProvider::new(noenv_flake_path.into()));
@@ -109,25 +125,20 @@ impl AppState {
             refresh_store: DashMap::new(),
             providers: DashMap::new(),
             provider_factories: DashMap::new(),
-            // --- New fields initialized here ---
             sessions: SessionStore::new(),
             compute_providers,
             default_compute_provider,
         });
 
-        // Register all available auth provider factories at startup.
         auth::register_builtin_providers(&state);
 
         Ok(state)
     }
-
-    /// Registers a factory for creating an authentication provider.
+    
     pub fn register_provider_factory(&self, factory: AuthProviderFactoryDyn) {
         self.provider_factories.insert(factory.id().to_string(), factory);
     }
 
-    /// Lazily gets or creates an authentication provider.
-    /// This ensures the server can start even if some providers are misconfigured.
     pub async fn get_or_create_provider(self: &Arc<Self>, id: &ProviderId) -> Result<AuthProviderDyn> {
         if let Some(provider) = self.providers.get(id) {
             return Ok(provider.clone());
