@@ -173,8 +173,8 @@ struct DeviceTokenError {
 enum DeviceTokenOut {
     Ok {
         access_token: String,
-        token_type: String,
-        scope: String,
+        _token_type: String,
+        _scope: String,
     },
     Err(DeviceTokenError),
 }

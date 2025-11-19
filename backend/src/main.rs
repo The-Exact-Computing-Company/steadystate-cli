@@ -2,11 +2,11 @@
 
 // ... (same imports)
 use std::net::SocketAddr;
-use std::sync::Arc;
+
 
 use axum::Router;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::EnvFilter;
 
 mod state;
 mod jwt;

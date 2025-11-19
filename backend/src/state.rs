@@ -23,13 +23,13 @@ pub struct Config {
     pub enable_fake_auth: bool,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
-    pub gitlab_client_id: Option<String>,
-    pub gitlab_client_secret: Option<String>,
-    pub orchid_client_id: Option<String>,
-    pub orchid_client_secret: Option<String>,
+    pub _gitlab_client_id: Option<String>,
+    pub _gitlab_client_secret: Option<String>,
+    pub _orchid_client_id: Option<String>,
+    pub _orchid_client_secret: Option<String>,
     
     // Timeouts & TTLs
-    pub device_poll_interval: u64,
+    pub _device_poll_interval: u64,
     pub jwt_ttl_secs: u64,
     pub refresh_ttl_secs: u64,
 

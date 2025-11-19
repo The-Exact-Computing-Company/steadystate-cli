@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::os::unix::process::ExitStatusExt;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::AsyncRead;
 

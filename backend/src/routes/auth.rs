@@ -1,6 +1,6 @@
 // backend/src/routes/auth.rs
 
-use std::sync::Arc;
+
 use axum::{
     extract::{Query, State},
     http::StatusCode,
