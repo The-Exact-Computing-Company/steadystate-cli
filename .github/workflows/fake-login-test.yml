@@ -28,6 +28,7 @@ jobs:
           export ENABLE_FAKE_AUTH=1
           export JWT_SECRET=test-secret
           export PORT=8080
+          export NOENV_FLAKE_PATH=/tmp/dummy-flake
           
           result-backend/bin/steadystate-backend &
           BACKEND_PID=$!

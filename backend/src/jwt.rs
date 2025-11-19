@@ -1,64 +1,94 @@
-// src/jwt.rs
+// backend/src/jwt.rs
 
+use std::collections::HashSet;
 use anyhow::{anyhow, Result};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use axum::{
+    extract::FromRequestParts,
+    http::{header, request::Parts, StatusCode},
+};
+use jwt_simple::prelude::*;
 use serde::{Deserialize, Serialize};
+use crate::state::AppState;
 
 #[derive(Clone)]
 pub struct JwtKeys {
-    pub encoding: EncodingKey,
-    pub decoding: DecodingKey,
-    pub issuer: String,
-    pub ttl_secs: u64,
+    key: HS256Key,
+    issuer: String,
+    ttl_duration: Duration,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Claims {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CustomClaims {
     pub sub: String,
-    pub iss: String,
-    pub exp: usize,
     pub provider: String,
 }
 
 impl JwtKeys {
     pub fn new(secret: &str, issuer: &str, ttl_secs: u64) -> Self {
         Self {
-            encoding: EncodingKey::from_secret(secret.as_bytes()),
-            decoding: DecodingKey::from_secret(secret.as_bytes()),
+            key: HS256Key::from_bytes(secret.as_bytes()),
             issuer: issuer.into(),
-            ttl_secs,
+            ttl_duration: Duration::from_secs(ttl_secs),
         }
     }
 
     pub fn sign(&self, login: &str, provider: &str) -> Result<String> {
-        let exp = (now() + self.ttl_secs) as usize;
-
-        let claims = Claims {
-            sub: login.into(),
-            iss: self.issuer.clone(),
-            exp,
-            provider: provider.into(),
+        let custom_claims = CustomClaims {
+            sub: login.to_string(),
+            provider: provider.to_string(),
         };
 
-        encode(&Header::default(), &claims, &self.encoding)
-            .map_err(|e| anyhow!("encode jwt: {}", e))
+        let claims = Claims::with_custom_claims(custom_claims, self.ttl_duration)
+            .with_issuer(self.issuer.clone())
+            .with_subject(login.to_string());
+
+        self.key.authenticate(claims).map_err(|e| anyhow!("Failed to sign JWT: {}", e))
     }
 
-    pub fn verify(&self, token: &str) -> Result<Claims> {
-        let data = decode::<Claims>(
-            token,
-            &self.decoding,
-            &Validation::default(),
-        )
-        .map_err(|e| anyhow!("invalid or expired JWT: {}", e))?;
+    pub fn verify(&self, token: &str) -> Result<CustomClaims> {
+        let mut allowed_issuers = HashSet::new();
+        allowed_issuers.insert(self.issuer.clone());
 
-        Ok(data.claims)
+        let options = VerificationOptions {
+            allowed_issuers: Some(allowed_issuers),
+            ..Default::default()
+        };
+
+        let claims = self.key
+            .verify_token::<CustomClaims>(token, Some(options))
+            .map_err(|e| anyhow!("Invalid or expired JWT: {}", e))?;
+        
+        Ok(claims.custom)
     }
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+// --- AXUM 0.8 EXTRACTOR FOR CUSTOM CLAIMS ---
+// NOTE: Do NOT use #[async_trait] here. Axum 0.8 uses standard async fn traits.
+
+impl FromRequestParts<AppState> for CustomClaims {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth_header = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                (StatusCode::UNAUTHORIZED, "Missing Authorization header".into())
+            })?;
+
+        let token = auth_header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| {
+                (StatusCode::BAD_REQUEST, "Invalid token type; expected Bearer".into())
+            })?;
+
+        state
+            .jwt
+            .verify(token)
+            .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))
+    }
 }

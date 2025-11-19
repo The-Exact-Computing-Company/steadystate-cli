@@ -5,12 +5,21 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     flake-utils.url = "github:numtide/flake-utils";
     treemerge.url = "github:b-rodrigues/treemerge";
+    antigravity-pkgs.url = "github:xiaoxiangmoe/nixpkgs/antigravity";
   };
 
-  outputs = { self, nixpkgs, flake-utils, treemerge }:
+  outputs = { self, nixpkgs, flake-utils, treemerge, antigravity-pkgs }:
     flake-utils.lib.eachDefaultSystem (system:
     let
       pkgs = import nixpkgs { inherit system; };
+
+      # Google antigravity
+      isCI = builtins.getEnv "CI" == "true" || builtins.getEnv "CI" == "1";
+      agpkgs = import antigravity-pkgs {
+        inherit system;
+        config.allowUnfree = true;
+      };
+      antigravity = agpkgs.antigravity; # typically how overlays expose it
 
       workspaceSrc = pkgs.lib.cleanSource ./.;
 
@@ -72,7 +81,8 @@
           backend
           cli
           treemerge.packages.${system}.default
-        ];
+          antigravity
+        ] ++ (if isCI then [] else [ antigravity ]);
 
         shellHook = ''
           echo "🔧 Entering SteadyState dev shell"
@@ -86,6 +96,7 @@
 
           # IMPORTANT: CLI must talk HTTP, not HTTPS
           export STEADYSTATE_BACKEND=http://localhost:8080
+          export NOENV_FLAKE_PATH=/tmp/dummy-flake
 
           echo "🚀 Launching backend in new terminal"
           ${terminal} -e sh -c "${backend}/bin/steadystate-backend; exec bash" &

@@ -1,6 +1,8 @@
-// src/main.rs
+// backend/src/main.rs
 
+// ... (same imports)
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::Router;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -11,42 +13,25 @@ mod jwt;
 mod models;
 mod routes;
 mod auth;
+mod compute;
 
 use crate::state::AppState;
-use crate::routes::auth::router as auth_router;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    //
-    // ---- Logging Setup ----
-    //
-    let filter = EnvFilter::from_default_env()
-        .add_directive("axum::rejection=warn".parse()?)
-        .add_directive("reqwest=warn".parse()?)
-        .add_directive("steadystate_backend=info".parse()?);
+    // ... (logging setup)
 
-    fmt()
-        .with_env_filter(filter)
-        .compact()
-        .init();
-
-    //
-    // ---- Application State ----
-    //
     let state = AppState::try_new().await?;
 
-    //
-    // ---- Router Setup ----
-    //
-    let app: Router<_,> = Router::new()
-        .nest("/auth", auth_router())
-        .with_state(state)
+    let app: Router = Router::new()
+        .nest("/auth", crate::routes::auth::router())
+        .nest("/sessions", crate::routes::sessions::router())
+        // Dereference the Arc<AppState> to pass AppState by value (it clones cheaply now)
+        .with_state((*state).clone()) 
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
-    //
-    // ---- Bind & Serve ----
-    //
+    // ... (bind & serve)
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -60,4 +45,4 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
-}
+} 
