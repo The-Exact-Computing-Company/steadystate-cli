@@ -47,8 +47,6 @@ pub async fn device_start(
         created_at: now(),
     });
 
-    info!("Inserted device code '{}' into pending store", start.device_code);
-
     Ok(Json(start))
 }
 
@@ -56,11 +54,9 @@ pub async fn poll(
     State(state): State<AppState>,
     Json(q): Json<PollQuery>,
 ) -> Result<Json<PollOut>, (StatusCode, String)> {
-    info!("Poll request received for device_code: '{}'", q.device_code);
     let pending = match state.device_pending.get(&q.device_code) {
         Some(e) => e,
         None => {
-            warn!("Device code '{}' not found in pending store", q.device_code);
             return Ok(Json(PollOut {
                 status: None,
                 jwt: None,
