@@ -12,7 +12,6 @@ use crate::{
     jwt::CustomClaims,
     models::{Session, SessionInfo, SessionRequest, SessionState},
     state::AppState,
-    compute::ComputeProvider,
 };
 
 pub fn router() -> Router<AppState> {

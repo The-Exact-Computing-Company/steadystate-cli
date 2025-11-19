@@ -60,7 +60,7 @@ impl CommandExecutor for MockCommandExecutor {
         Ok(ExitStatus::from_raw(0))
     }
 
-    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, impl AsyncRead + Unpin + Send)> {
+    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn AsyncRead + Unpin + Send>)> {
         self.calls.lock().unwrap().push(MockCommandCall {
             cmd: cmd.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
@@ -76,7 +76,7 @@ impl CommandExecutor for MockCommandExecutor {
             }
         }
 
-        Ok((1234, std::io::Cursor::new(stdout_content)))
+        Ok((1234, Box::new(std::io::Cursor::new(stdout_content))))
     }
 
     async fn run_shell(&self, script: &str) -> Result<ExitStatus> {
@@ -109,22 +109,29 @@ async fn test_start_session_success() {
 
     let mut session = Session {
         id: "test-session".into(),
-        user_id: "user1".into(),
-        provider_id: "local".into(),
-        state: SessionState::Pending,
+        repo_url: "https://github.com/user/repo".into(),
+        branch: None,
+        environment: None,
+        compute_provider: "local".into(),
+        creator_login: "user1".into(),
+        state: SessionState::Provisioning,
         endpoint: None,
-        created_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now(),
+        created_at: std::time::SystemTime::now(),
+        updated_at: std::time::SystemTime::now(),
+        error_message: None,
     };
 
     let request = SessionRequest {
         repo_url: "https://github.com/user/repo".into(),
+        branch: None,
+        environment: None,
+        provider_config: None,
     };
 
     provider.start_session(&mut session, &request).await.unwrap();
 
-    assert_eq!(session.state, SessionState::Running);
-    assert_eq!(session.endpoint, Some("Invite: ssh://user@host:22\n".to_string()));
+    assert!(matches!(session.state, SessionState::Running));
+    assert_eq!(session.endpoint, Some("Invite: ssh://user@host:22".to_string()));
 
     let calls = executor.get_calls();
     // Verify sequence: check nix, (maybe install lix), clone, upterm
@@ -155,14 +162,23 @@ async fn test_terminate_session() {
 
     let mut session = Session {
         id: "test-session-kill".into(),
-        user_id: "user1".into(),
-        provider_id: "local".into(),
-        state: SessionState::Pending,
+        repo_url: "repo".into(),
+        branch: None,
+        environment: None,
+        compute_provider: "local".into(),
+        creator_login: "user1".into(),
+        state: SessionState::Provisioning,
         endpoint: None,
-        created_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now(),
+        created_at: std::time::SystemTime::now(),
+        updated_at: std::time::SystemTime::now(),
+        error_message: None,
     };
-    let request = SessionRequest { repo_url: "repo".into() };
+    let request = SessionRequest { 
+        repo_url: "repo".into(),
+        branch: None,
+        environment: None,
+        provider_config: None,
+    };
     
     provider.start_session(&mut session, &request).await.unwrap();
 

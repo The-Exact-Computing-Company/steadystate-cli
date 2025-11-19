@@ -16,7 +16,7 @@ use crate::models::{Session, SessionRequest, SessionState};
 #[async_trait::async_trait]
 pub trait CommandExecutor: Send + Sync + std::fmt::Debug {
     async fn run_status(&self, cmd: &str, args: &[&str]) -> Result<std::process::ExitStatus>;
-    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, impl tokio::io::AsyncRead + Unpin + Send)>;
+    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn tokio::io::AsyncRead + Unpin + Send>)>;
     async fn run_shell(&self, script: &str) -> Result<std::process::ExitStatus>;
 }
 
@@ -33,7 +33,7 @@ impl CommandExecutor for RealCommandExecutor {
             .context(format!("Failed to execute {}", cmd))
     }
 
-    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, impl tokio::io::AsyncRead + Unpin + Send)> {
+    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn tokio::io::AsyncRead + Unpin + Send>)> {
         let mut c = Command::new(cmd);
         c.args(args);
         c.stdout(std::process::Stdio::piped());
@@ -43,7 +43,7 @@ impl CommandExecutor for RealCommandExecutor {
         let pid = child.id().ok_or_else(|| anyhow!("Failed to get PID"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to capture stdout"))?;
         
-        Ok((pid, stdout))
+        Ok((pid, Box::new(stdout)))
     }
 
     async fn run_shell(&self, script: &str) -> Result<std::process::ExitStatus> {
