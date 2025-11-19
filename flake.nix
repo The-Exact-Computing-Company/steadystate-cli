@@ -96,6 +96,7 @@
 
           # IMPORTANT: CLI must talk HTTP, not HTTPS
           export STEADYSTATE_BACKEND=http://localhost:8080
+          export NOENV_FLAKE_PATH=/tmp/dummy-flake
 
           echo "🚀 Launching backend in new terminal"
           ${terminal} -e sh -c "${backend}/bin/steadystate-backend; exec bash" &
