@@ -158,7 +158,7 @@ fn up_refreshes_proactively_when_jwt_expired() {
         // Proactive refresh call
         MockResponse::Json(json!({ "jwt": "fresh-jwt-123" })),
         // Session creation call
-        MockResponse::Json(json!({ "id": "session-xyz", "ssh_url": "ssh://fresh" })),
+        MockResponse::Json(json!({ "id": "session-xyz", "state": "Running", "endpoint": "ssh://fresh", "message": null, "compute_provider": "local" })),
     ];
     let mut harness = TestHarness::new(script);
     harness.create_expired_session();

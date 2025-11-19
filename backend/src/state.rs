@@ -77,6 +77,8 @@ pub struct AppState {
     pub refresh_store: Arc<DashMap<String, RefreshRecord>>,
     pub providers: Arc<DashMap<ProviderId, AuthProviderDyn>>,
     pub provider_factories: Arc<DashMap<String, AuthProviderFactoryDyn>>,
+    // Key: (provider, login) -> access_token
+    pub provider_tokens: Arc<DashMap<(String, String), String>>,
 
     // Compute & Session state
     pub sessions: SessionStore,
@@ -116,6 +118,7 @@ impl AppState {
             refresh_store: Arc::new(DashMap::new()),
             providers: Arc::new(DashMap::new()),
             provider_factories: Arc::new(DashMap::new()),
+            provider_tokens: Arc::new(DashMap::new()),
             sessions: SessionStore::new(),
             compute_providers: Arc::new(compute_providers),
         });

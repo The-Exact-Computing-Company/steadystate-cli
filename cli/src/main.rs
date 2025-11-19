@@ -163,7 +163,7 @@ async fn up(client: &Client, repo: String, json: bool) -> Result<()> {
         |c, jwt| {
             c.post(format!("{}/sessions", &*BACKEND_URL))
                 .bearer_auth(jwt)
-                .json(&serde_json::json!({ "repo": repo.clone() }))
+                .json(&serde_json::json!({ "repo_url": repo.clone() }))
         },
         None,
     )
@@ -173,7 +173,13 @@ async fn up(client: &Client, repo: String, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
         println!("✅ Session created: {}", resp.id);
-        println!("SSH: {}", resp.ssh_url);
+        if let Some(endpoint) = resp.endpoint {
+             println!("SSH: {}", endpoint);
+        } else {
+             println!("Session is provisioning... (run 'steadystate up' again or check status later)");
+             // Ideally we would poll here, but for now let's just inform the user.
+             // Or we can implement a simple poll loop here similar to device login.
+        }
     }
 
     Ok(())

@@ -125,7 +125,7 @@ async fn test_start_session_success() {
         repo_url: "https://github.com/user/repo".into(),
         branch: None,
         environment: None,
-        _provider_config: None,
+        provider_config: None,
     };
 
     provider.start_session(&mut session, &request).await.unwrap();
@@ -177,7 +177,7 @@ async fn test_terminate_session() {
         repo_url: "repo".into(),
         branch: None,
         environment: None,
-        _provider_config: None,
+        provider_config: None,
     };
     
     provider.start_session(&mut session, &request).await.unwrap();
@@ -218,7 +218,7 @@ async fn test_start_session_git_failure() {
         repo_url: "https://github.com/user/repo".into(),
         branch: None,
         environment: None,
-        _provider_config: None,
+        provider_config: None,
     };
 
     let result = provider.start_session(&mut session, &request).await;
@@ -256,7 +256,7 @@ async fn test_start_session_upterm_failure() {
         repo_url: "https://github.com/user/repo".into(),
         branch: None,
         environment: None,
-        _provider_config: None,
+        provider_config: None,
     };
 
     let result = provider.start_session(&mut session, &request).await;
@@ -295,7 +295,7 @@ async fn test_start_session_nix_failure() {
         repo_url: "https://github.com/user/repo".into(),
         branch: None,
         environment: None,
-        _provider_config: None,
+        provider_config: None,
     };
 
     let result = provider.start_session(&mut session, &request).await;

@@ -18,6 +18,11 @@ pub struct JwtKeys {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct InternalCustomClaims {
+    provider: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CustomClaims {
     pub sub: String,
     pub provider: String,
@@ -33,12 +38,11 @@ impl JwtKeys {
     }
 
     pub fn sign(&self, login: &str, provider: &str) -> Result<String> {
-        let custom_claims = CustomClaims {
-            sub: login.to_string(),
+        let internal_claims = InternalCustomClaims {
             provider: provider.to_string(),
         };
 
-        let claims = Claims::with_custom_claims(custom_claims, self.ttl_duration)
+        let claims = Claims::with_custom_claims(internal_claims, self.ttl_duration)
             .with_issuer(self.issuer.clone())
             .with_subject(login.to_string());
 
@@ -55,10 +59,15 @@ impl JwtKeys {
         };
 
         let claims = self.key
-            .verify_token::<CustomClaims>(token, Some(options))
+            .verify_token::<InternalCustomClaims>(token, Some(options))
             .map_err(|e| anyhow!("Invalid or expired JWT: {}", e))?;
         
-        Ok(claims.custom)
+        let sub = claims.subject.ok_or_else(|| anyhow!("JWT missing subject claim"))?;
+
+        Ok(CustomClaims {
+            sub,
+            provider: claims.custom.provider,
+        })
     }
 }
 

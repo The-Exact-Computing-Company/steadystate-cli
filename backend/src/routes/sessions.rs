@@ -62,7 +62,7 @@ async fn run_provisioning(
 async fn create_session(
     State(state): State<AppState>,
     claims: CustomClaims,
-    Json(request): Json<SessionRequest>,
+    Json(mut request): Json<SessionRequest>,
 ) -> (StatusCode, Json<SessionInfo>) {
     let session_id = Uuid::new_v4().to_string();
     let now = std::time::SystemTime::now();
@@ -76,7 +76,7 @@ async fn create_session(
         endpoint: None,
         // FIX IS HERE: Access default_compute_provider via config
         compute_provider: state.config.default_compute_provider.clone(),
-        _creator_login: claims.sub,
+        _creator_login: claims.sub.clone(),
         _created_at: now,
         updated_at: now,
         error_message: None,
@@ -85,6 +85,21 @@ async fn create_session(
     let session_info = SessionInfo::from(&session);
     
     state.sessions.insert(session_id.clone(), session);
+
+    // --- Inject GitHub token if available ---
+    if claims.provider == "github" {
+        if let Some(token) = state
+            .provider_tokens
+            .get(&("github".to_string(), claims.sub.clone()))
+        {
+            request.provider_config = Some(serde_json::json!({
+                "github": {
+                    "login": claims.sub,
+                    "access_token": token.value().clone(),
+                }
+            }));
+        }
+    }
 
     // state is cheap to clone now
     tokio::spawn(run_provisioning(state.clone(), session_id, request));

@@ -75,7 +75,7 @@ pub async fn poll(
     };
 
     match provider.poll_device_flow(&q.device_code).await {
-        Ok(DevicePollOutcome::Complete(identity)) => {
+        Ok(DevicePollOutcome::Complete { identity, provider_access_token }) => {
             info!(
                 "device flow complete for {} via {}",
                 identity.login,
@@ -89,6 +89,13 @@ pub async fn poll(
                 .sign(&identity.login, provider_id.as_str())
                 .map_err(internal)?;
             let refresh_token = state.issue_refresh_token(identity.login.clone(), provider_id);
+
+            if let Some(token) = provider_access_token {
+                state.provider_tokens.insert(
+                    (identity.provider.clone(), identity.login.clone()),
+                    token
+                );
+            }
 
             Ok(Json(PollOut {
                 status: Some("complete".into()),

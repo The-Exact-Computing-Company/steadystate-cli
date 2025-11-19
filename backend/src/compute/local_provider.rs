@@ -214,6 +214,87 @@ async fn capture_upterm_invite(stdout: impl tokio::io::AsyncRead + Unpin) -> Res
 
 
 
+#[derive(Debug, serde::Deserialize)]
+struct GitHubComputeConfig {
+    login: String,
+    access_token: String,
+}
+
+fn parse_github_repo(repo_url: &str) -> Option<(String, String)> {
+    // Supports https://github.com/owner/repo(.git)
+    let url = repo_url.strip_prefix("https://github.com/")?;
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let mut parts = url.split('/');
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    Some((owner, repo))
+}
+
+async fn ensure_fork_and_clone(
+    http: &reqwest::Client,
+    gh: &GitHubComputeConfig,
+    original_repo_url: &str,
+    dest: &Path,
+    executor: &dyn CommandExecutor,
+) -> Result<()> {
+    let (owner, repo) = parse_github_repo(original_repo_url)
+        .ok_or_else(|| anyhow!("Unsupported GitHub repo URL: {}", original_repo_url))?;
+
+    let user = &gh.login;
+
+    // 1. Check if fork already exists
+    let fork_url = format!("https://api.github.com/repos/{}/{}", user, repo);
+    let resp = http
+        .get(&fork_url)
+        .bearer_auth(&gh.access_token)
+        .header("User-Agent", "steadystate-backend/0.1")
+        .send()
+        .await?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // 2. Create fork
+        let create_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+        tracing::info!("Creating fork of {}/{} for {}", owner, repo, user);
+
+        let fork_resp = http
+            .post(format!("{}/forks", create_url))
+            .bearer_auth(&gh.access_token)
+            .header("User-Agent", "steadystate-backend/0.1")
+            .send()
+            .await?
+            .error_for_status()
+            .context("Failed to create fork via GitHub API")?;
+
+        tracing::debug!("Fork response: {:?}", fork_resp.status());
+
+        // Simple backoff: give GitHub a moment to materialize the fork
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+
+    // 3. Clone the *fork* into dest
+    // Inject token into URL for authenticated clone
+    let fork_clone_url = format!("https://x-access-token:{}@github.com/{}/{}.git", gh.access_token, user, repo);
+    tracing::info!("Cloning fork {} into {}", fork_clone_url.replace(&gh.access_token, "***"), dest.display());
+    
+    let status = executor.run_status("git", &["clone", "--depth=1", &fork_clone_url, dest.to_str().unwrap()]).await
+        .context("Failed to spawn git clone")?;
+
+    if !status.success() {
+        return Err(anyhow!("git clone failed for {}", fork_clone_url.replace(&gh.access_token, "***")));
+    }
+
+    // 4. Add upstream remote pointing at the original repo (best effort)
+    let upstream_url = format!("https://github.com/{}/{}.git", owner, repo);
+    let status = executor.run_status("git", &["-C", dest.to_str().unwrap(), "remote", "add", "upstream", &upstream_url]).await
+        .context("Failed to add upstream remote")?;
+
+    if !status.success() {
+        tracing::warn!("git remote add upstream failed for {}", dest.display());
+    }
+
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl ComputeProvider for LocalComputeProvider {
     fn id(&self) -> &'static str { "local" }
@@ -225,7 +306,21 @@ impl ComputeProvider for LocalComputeProvider {
         
         let (workspace_root, repo_path) = self.create_workspace(&session.id)?;
         
-        self.clone_repo(&request.repo_url, &repo_path).await?;
+        // --- New: if GitHub config present, fork+clone. Otherwise, plain clone.
+        if let Some(cfg) = &request.provider_config {
+            if let Some(gh_val) = cfg.get("github") {
+                if let Ok(gh) = serde_json::from_value::<GitHubComputeConfig>(gh_val.clone()) {
+                    let http = reqwest::Client::new();
+                    ensure_fork_and_clone(&http, &gh, &request.repo_url, &repo_path, self.executor.as_ref()).await?;
+                } else {
+                    self.clone_repo(&request.repo_url, &repo_path).await?;
+                }
+            } else {
+                self.clone_repo(&request.repo_url, &repo_path).await?;
+            }
+        } else {
+            self.clone_repo(&request.repo_url, &repo_path).await?;
+        }
         
         let (pid, invite) = self.launch_upterm_in_noenv(&self.flake_path, &repo_path).await?;
         

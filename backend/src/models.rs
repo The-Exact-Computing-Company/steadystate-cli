@@ -137,8 +137,7 @@ pub struct SessionRequest {
     pub repo_url: String,
     pub branch: Option<String>,
     pub environment: Option<String>,
-    #[serde(rename = "provider_config")]
-    pub _provider_config: Option<serde_json::Value>,
+    pub provider_config: Option<serde_json::Value>,
 }
 
 /// The information about a session that is sent back to the CLI.
