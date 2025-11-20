@@ -47,6 +47,8 @@ async fn test_integration_nix_check() {
         branch: None,
         environment: None,
         provider_config: None,
+        allowed_users: None,
+        public: false,
     };
 
     let result = provider.start_session(&mut session, &request).await;

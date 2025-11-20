@@ -9,6 +9,7 @@ use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+use std::os::unix::process::CommandExt;
 
 use crate::compute::ComputeProvider;
 use crate::models::{Session, SessionRequest, SessionState};
@@ -16,7 +17,7 @@ use crate::models::{Session, SessionRequest, SessionState};
 #[async_trait::async_trait]
 pub trait CommandExecutor: Send + Sync + std::fmt::Debug {
     async fn run_status(&self, cmd: &str, args: &[&str]) -> Result<std::process::ExitStatus>;
-    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn tokio::io::AsyncRead + Unpin + Send>)>;
+    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box<dyn tokio::io::AsyncRead + Unpin + Send>)>;
     async fn run_shell(&self, script: &str) -> Result<std::process::ExitStatus>;
 }
 
@@ -28,28 +29,35 @@ impl CommandExecutor for RealCommandExecutor {
     async fn run_status(&self, cmd: &str, args: &[&str]) -> Result<std::process::ExitStatus> {
         Command::new(cmd)
             .args(args)
+            .stdin(std::process::Stdio::null())
+            .process_group(0)
             .status()
             .await
             .context(format!("Failed to execute {}", cmd))
     }
 
-    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn tokio::io::AsyncRead + Unpin + Send>)> {
+    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box<dyn tokio::io::AsyncRead + Unpin + Send>)> {
         let mut c = Command::new(cmd);
         c.args(args);
+        c.stdin(std::process::Stdio::null());
+        c.process_group(0);
         c.stdout(std::process::Stdio::piped());
-        c.stderr(std::process::Stdio::piped()); // Capture stderr too if needed, or null it
+        c.stderr(std::process::Stdio::piped());
 
         let mut child = c.spawn().context(format!("Failed to spawn {}", cmd))?;
         let pid = child.id().ok_or_else(|| anyhow!("Failed to get PID"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to capture stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow!("Failed to capture stderr"))?;
         
-        Ok((pid, Box::new(stdout)))
+        Ok((pid, Box::new(stdout), Box::new(stderr)))
     }
 
     async fn run_shell(&self, script: &str) -> Result<std::process::ExitStatus> {
         Command::new("sh")
             .arg("-c")
             .arg(script)
+            .stdin(std::process::Stdio::null())
+            .process_group(0)
             .status()
             .await
             .context("Failed to execute shell script")
@@ -141,39 +149,113 @@ impl LocalComputeProvider {
         Ok(())
     }
 
-    async fn launch_upterm_in_noenv(&self, flake_path: &Path, working_dir: &Path) -> Result<(u32, String)> {
-        let inner_cmd = "upterm host --force-command=bash";
+    async fn launch_upterm_in_noenv(
+        &self,
+        flake_path: &Path,
+        working_dir: &Path,
+        github_user: Option<&str>,
+        allowed_users: Option<&[String]>,
+        public: bool,
+    ) -> Result<(u32, String)> {
+        // We run upterm from the host (backend environment), which wraps the nix develop session.
+        // This ensures upterm is found (since it's in the host env) and the user lands in the nix dev shell.
         
         // We use shell_escape to safely insert paths into the shell string.
         let safe_workdir = shell_escape::escape(working_dir.to_string_lossy().into());
         let safe_flake = shell_escape::escape(flake_path.to_string_lossy().into());
         
+        // The command that upterm will run *inside* the session:
+        // We use `bash` as the command inside nix develop to give an interactive shell.
+        let session_cmd = format!("nix develop {}#default --command bash", safe_flake);
+        let safe_session_cmd = shell_escape::escape(session_cmd.into());
+
+        // Construct upterm host command
+        let mut upterm_args = vec!["host".to_string()];
+        
+        // 1. Server configuration
+        if let Ok(server) = std::env::var("STEADYSTATE_UPTERM_SERVER") {
+            upterm_args.push("--server".to_string());
+            upterm_args.push(server);
+        }
+
+        // 2. Authorization
+        if !public {
+            // If not public, we must have at least one authorized user (the creator)
+            if let Some(user) = github_user {
+                upterm_args.push("--github-user".to_string());
+                upterm_args.push(user.to_string());
+            }
+            
+            if let Some(users) = allowed_users {
+                for user in users {
+                    upterm_args.push("--github-user".to_string());
+                    upterm_args.push(user.clone());
+                }
+            }
+        }
+
+        // 4. Force command
+        upterm_args.push(format!("--force-command={}", safe_session_cmd));
+
+        let upterm_cmd_str = upterm_args.join(" ");
+
         let full_cmd = format!(
-            "cd {} && nix develop {}#default --command {}",
-            safe_workdir, safe_flake, inner_cmd
+            "cd {} && upterm {}",
+            safe_workdir, upterm_cmd_str.strip_prefix("upterm ").unwrap_or(&upterm_cmd_str)
         );
 
-        tracing::info!("Starting upterm session...");
+        tracing::info!("Starting upterm session with command: {}", full_cmd);
         
         let nix_wrapper = format!(
             r#"
             if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
               . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
             fi
+            echo "DEBUG: Wrapper started, running full_cmd..." >&2
+            echo "DEBUG: PATH=$PATH" >&2
+            unset SSH_ASKPASS
+            unset DISPLAY
+            unset SSH_AUTH_SOCK
             {}
+            echo "DEBUG: full_cmd finished with exit code $?" >&2
             "#,
             full_cmd
         );
         
-        let (pid, stdout) = self.executor.run_capture("sh", &["-c", &nix_wrapper]).await
+        tracing::info!("Spawning upterm command...");
+        let (pid, stdout, stderr) = self.executor.run_capture("sh", &["-c", &nix_wrapper]).await
             .context("Failed to spawn nix develop/upterm")?;
 
-        // We wait for the invite link to appear in stdout.
-        let invite = timeout(Duration::from_secs(30), capture_upterm_invite(stdout))
-            .await
-            .context("Timed out waiting for upterm invite")??;
+        tracing::info!("Upterm spawned with PID {}", pid);
 
-        Ok((pid, invite))
+        // Spawn a task to log stderr
+        let stderr_reader = BufReader::new(stderr);
+        tokio::spawn(async move {
+            let mut lines = tokio_stream::wrappers::LinesStream::new(stderr_reader.lines());
+            while let Some(line_res) = lines.next().await {
+                match line_res {
+                    Ok(line) => eprintln!("UPTERM STDERR: {}", line),
+                    Err(e) => eprintln!("Error reading upterm stderr: {}", e),
+                }
+            }
+        });
+
+        // We wait for the invite link to appear in stdout.
+        let invite_result = timeout(Duration::from_secs(30), capture_upterm_invite(stdout)).await;
+
+        match invite_result {
+            Ok(Ok(invite)) => Ok((pid, invite)),
+            Ok(Err(e)) => {
+                tracing::error!("Upterm failed to provide invite: {:#}", e);
+                let _ = self.kill_pid(pid).await;
+                Err(e)
+            }
+            Err(_) => {
+                tracing::error!("Timed out waiting for upterm invite");
+                let _ = self.kill_pid(pid).await;
+                Err(anyhow!("Timed out waiting for upterm invite"))
+            }
+        }
     }
 
     async fn kill_pid(&self, pid: u32) -> Result<()> {
@@ -197,16 +279,24 @@ impl LocalComputeProvider {
 
 
 
-async fn capture_upterm_invite(stdout: impl tokio::io::AsyncRead + Unpin) -> Result<String> {
+pub(crate) async fn capture_upterm_invite(stdout: impl tokio::io::AsyncRead + Unpin) -> Result<String> {
     let reader = BufReader::new(stdout);
     let mut lines = tokio_stream::wrappers::LinesStream::new(reader.lines());
 
     while let Some(line_res) = lines.next().await {
         let line = line_res?;
-        tracing::debug!(upterm_line = %line, "upterm stdout");
-        if line.starts_with("Invite: ssh") {
-            tracing::info!("Captured upterm invite: {}", line);
-            return Ok(line);
+        tracing::warn!(upterm_stdout = %line, "upterm stdout");
+        let trimmed = line.trim();
+        if trimmed.starts_with("Invite: ssh") {
+            tracing::info!("Captured upterm invite: {}", trimmed);
+            return Ok(trimmed.to_string());
+        } else if trimmed.starts_with("SSH Session:") {
+            // Format: "SSH Session:            ssh ..."
+            if let Some(ssh_cmd) = trimmed.strip_prefix("SSH Session:") {
+                let ssh_cmd = ssh_cmd.trim();
+                tracing::info!("Captured upterm invite: {}", ssh_cmd);
+                return Ok(ssh_cmd.to_string());
+            }
         }
     }
     Err(anyhow!("Upterm did not print an invite line"))
@@ -322,7 +412,23 @@ impl ComputeProvider for LocalComputeProvider {
             self.clone_repo(&request.repo_url, &repo_path).await?;
         }
         
-        let (pid, invite) = self.launch_upterm_in_noenv(&self.flake_path, &repo_path).await?;
+        // Extract GitHub login if available
+        let mut github_login = None;
+        if let Some(cfg) = &request.provider_config {
+             if let Some(gh_val) = cfg.get("github") {
+                if let Ok(gh) = serde_json::from_value::<GitHubComputeConfig>(gh_val.clone()) {
+                    github_login = Some(gh.login);
+                }
+             }
+        }
+
+        let (pid, invite) = self.launch_upterm_in_noenv(
+            &self.flake_path, 
+            &repo_path,
+            github_login.as_deref(),
+            request.allowed_users.as_deref(),
+            request.public
+        ).await?;
         
         // Store session state (PID) so we can kill it later.
         self.state.live_sessions.insert(session.id.clone(), LocalSession { pid, workspace_root });

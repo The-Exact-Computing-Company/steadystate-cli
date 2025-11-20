@@ -60,7 +60,7 @@ impl CommandExecutor for MockCommandExecutor {
         Ok(ExitStatus::from_raw(0))
     }
 
-    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn AsyncRead + Unpin + Send>)> {
+    async fn run_capture(&self, cmd: &str, args: &[&str]) -> Result<(u32, Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncRead + Unpin + Send>)> {
         self.calls.lock().unwrap().push(MockCommandCall {
             cmd: cmd.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
@@ -76,7 +76,7 @@ impl CommandExecutor for MockCommandExecutor {
             }
         }
 
-        Ok((1234, Box::new(std::io::Cursor::new(stdout_content))))
+        Ok((1234, Box::new(std::io::Cursor::new(stdout_content)), Box::new(std::io::Cursor::new(""))))
     }
 
     async fn run_shell(&self, script: &str) -> Result<ExitStatus> {
@@ -126,6 +126,8 @@ async fn test_start_session_success() {
         branch: None,
         environment: None,
         provider_config: None,
+        allowed_users: None,
+        public: false,
     };
 
     provider.start_session(&mut session, &request).await.unwrap();
@@ -178,6 +180,8 @@ async fn test_terminate_session() {
         branch: None,
         environment: None,
         provider_config: None,
+        allowed_users: None,
+        public: false,
     };
     
     provider.start_session(&mut session, &request).await.unwrap();
@@ -187,6 +191,24 @@ async fn test_terminate_session() {
 
     let calls = executor.get_calls();
     assert!(calls.iter().any(|c| c.args.iter().any(|a| a.contains("kill -TERM"))));
+}
+
+#[tokio::test]
+async fn test_capture_upterm_invite_parsing() {
+    let output = "=== BFO1HH1SZDG28RVDWPAM
+Command:                bash
+Force Command:          n/a
+Host:                   ssh://uptermd.upterm.dev:22
+Authorized Keys:        n/a
+SSH Session:            ssh BFO1HH1sZDg28RvdWpam:MTc4MTFlNDBjZTk0ZTgudm0udXB0ZXJtLmludGVrbmFsOjIyMjI=@uptermd.upterm.dev
+
+Run 'upterm session current' to display this screen again
+";
+    let cursor = Box::new(std::io::Cursor::new(output));
+    let result = crate::compute::local_provider::capture_upterm_invite(cursor).await;
+    assert!(result.is_ok());
+    let invite = result.unwrap();
+    assert_eq!(invite, "ssh BFO1HH1sZDg28RvdWpam:MTc4MTFlNDBjZTk0ZTgudm0udXB0ZXJtLmludGVrbmFsOjIyMjI=@uptermd.upterm.dev");
 }
 
 #[tokio::test]
@@ -219,6 +241,8 @@ async fn test_start_session_git_failure() {
         branch: None,
         environment: None,
         provider_config: None,
+        allowed_users: None,
+        public: false,
     };
 
     let result = provider.start_session(&mut session, &request).await;
@@ -257,6 +281,8 @@ async fn test_start_session_upterm_failure() {
         branch: None,
         environment: None,
         provider_config: None,
+        allowed_users: None,
+        public: false,
     };
 
     let result = provider.start_session(&mut session, &request).await;
@@ -296,6 +322,8 @@ async fn test_start_session_nix_failure() {
         branch: None,
         environment: None,
         provider_config: None,
+        allowed_users: None,
+        public: false,
     };
 
     let result = provider.start_session(&mut session, &request).await;

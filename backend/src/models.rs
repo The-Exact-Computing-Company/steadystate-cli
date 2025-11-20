@@ -138,6 +138,9 @@ pub struct SessionRequest {
     pub branch: Option<String>,
     pub environment: Option<String>,
     pub provider_config: Option<serde_json::Value>,
+    pub allowed_users: Option<Vec<String>>,
+    #[serde(default)]
+    pub public: bool,
 }
 
 /// The information about a session that is sent back to the CLI.

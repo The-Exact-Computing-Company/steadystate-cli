@@ -1,6 +1,7 @@
 // backend/src/jwt.rs
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use axum::{
     extract::FromRequestParts,
@@ -74,12 +75,12 @@ impl JwtKeys {
 // --- AXUM 0.8 EXTRACTOR FOR CUSTOM CLAIMS ---
 // NOTE: Do NOT use #[async_trait] here. Axum 0.8 uses standard async fn traits.
 
-impl FromRequestParts<AppState> for CustomClaims {
+impl FromRequestParts<Arc<AppState>> for CustomClaims {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &AppState,
+        state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let auth_header = parts
             .headers

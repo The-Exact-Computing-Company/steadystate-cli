@@ -57,7 +57,8 @@
         '';
       };
 
-      terminal = pkgs.lib.getExe' pkgs.xterm "xterm";
+      #terminal = pkgs.lib.getExe' pkgs.xterm "xterm";
+      terminal = pkgs.lib.getExe' pkgs.kitty "kitty";
 
     in {
       packages.default = cli;
@@ -81,8 +82,8 @@
           backend
           cli
           treemerge.packages.${system}.default
-          antigravity
-        ] ++ (if isCI then [] else [ antigravity ]);
+          pkgs.upterm
+        ] ++ (if isCI then [] else [ antigravity pkgs.gemini-cli]);
 
         shellHook = ''
           echo "🔧 Entering SteadyState dev shell"

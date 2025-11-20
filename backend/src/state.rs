@@ -58,7 +58,7 @@ impl Config {
             
             noenv_flake_path: std::env::var("NOENV_FLAKE_PATH")
                 .context("NOENV_FLAKE_PATH must be set")?,
-            default_compute_provider: std::env::var("DEFAULT_COMPUTE_PROVIDER")
+            default_compute_provider: std::env::var("STEADYSTATE_PROVIDER")
                 .unwrap_or_else(|_| "local".to_string()),
         })
     }
