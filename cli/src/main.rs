@@ -167,17 +167,49 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
         "Invalid repository URL. Provide a fully-qualified URL (e.g. https://github.com/user/repo).",
     )?;
 
+    // Validate --env flag
+    let env_val = match env {
+        Some(e) => e,
+        None => {
+            eprintln!("Error: --env flag is required.");
+            eprintln!("Valid options:");
+            eprintln!("  --env=noenv                 Use minimal curated environment");
+            eprintln!("  --env=flake                 Use repository's flake.nix");
+            eprintln!("  --env=legacy-nix            Use default.nix (nix-shell)");
+            eprintln!("  --env=legacy-nix[filename]  Use specified nix file (nix-shell)");
+            return Ok(());
+        }
+    };
+
+    // Check if env is valid
+    let is_valid = env_val == "noenv" ||
+                   env_val == "flake" ||
+                   env_val == "legacy-nix" ||
+                   (env_val.starts_with("legacy-nix[") && env_val.ends_with("]"));
+
+    if !is_valid {
+        eprintln!("Error: Invalid --env option: {}", env_val);
+        eprintln!("Valid options:");
+        eprintln!("  --env=noenv                 Use minimal curated environment");
+        eprintln!("  --env=flake                 Use repository's flake.nix");
+        eprintln!("  --env=legacy-nix            Use default.nix (nix-shell)");
+        eprintln!("  --env=legacy-nix[filename]  Use specified nix file (nix-shell)");
+        return Ok(());
+    }
+
+    let payload = serde_json::json!({
+        "repo_url": repo,
+        "allowed_users": if allow.is_empty() { None } else { Some(allow.clone()) },
+        "public": public,
+        "environment": env_val
+    });
+
     let resp: UpResponse = request_with_auth(
         client,
         |c, jwt| {
             c.post(format!("{}/sessions", &*BACKEND_URL))
                 .bearer_auth(jwt)
-                .json(&serde_json::json!({
-                    "repo_url": repo.clone(),
-                    "allowed_users": if allow.is_empty() { None } else { Some(allow.clone()) },
-                    "public": public,
-                    "environment": env.clone()
-                }))
+                .json(&payload)
         },
         None,
     )

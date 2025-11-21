@@ -169,32 +169,74 @@ impl LocalComputeProvider {
         let safe_workdir = shell_escape::escape(working_dir.to_string_lossy().into());
         // let safe_flake = shell_escape::escape(flake_path.to_string_lossy().into());
         
-        // Choose flake based on --env flag
-        let flake_ref = if environment == Some("noenv") {
+        // Choose flake/nix file based on --env flag
+        let env_str = environment.unwrap_or("flake"); // Should be enforced by CLI, but default to flake
+        
+        let (cmd_prog, cmd_args) = if env_str == "noenv" {
             // Use curated minimal environment
             tracing::info!("Using --env=noenv: minimal curated environment");
-            "github:The-Exact-Computing-Company/steadystate?dir=backend/flakes/noenv".to_string()
-        } else {
+            (
+                "nix",
+                vec![
+                    "develop".to_string(),
+                    "github:The-Exact-Computing-Company/steadystate?dir=backend/flakes/noenv".to_string(),
+                    "--command".to_string(),
+                    "bash".to_string(),
+                ],
+            )
+        } else if env_str == "flake" {
             // Use repository's own flake
-            tracing::info!("Using repository's flake.nix");
+            tracing::info!("Using --env=flake: repository's flake.nix");
             let path_str = flake_path.to_string_lossy();
-            if path_str.starts_with("github:") {
+            let flake_ref = if path_str.starts_with("github:") {
                 path_str.to_string()
             } else {
                 // For local testing: point to repo's flake
-                // We assume the flake is at the root of the repo (working_dir)
                 // Since we cd into working_dir in the wrapper script, we can just use "."
                 ".".to_string()
-            }
+            };
+            (
+                "nix",
+                vec![
+                    "develop".to_string(),
+                    flake_ref,
+                    "--command".to_string(),
+                    "bash".to_string(),
+                ],
+            )
+        } else if env_str.starts_with("legacy-nix") {
+             // Handle legacy-nix (nix-shell)
+             let filename = if env_str == "legacy-nix" {
+                 "default.nix"
+             } else {
+                 // Parse legacy-nix[filename]
+                 let start = env_str.find('[').unwrap_or(0) + 1;
+                 let end = env_str.find(']').unwrap_or(env_str.len());
+                 &env_str[start..end]
+             };
+             
+             tracing::info!("Using --env={}: nix-shell {}", env_str, filename);
+             (
+                 "nix-shell",
+                 vec![
+                     filename.to_string(),
+                     "--command".to_string(),
+                     "bash".to_string(),
+                 ],
+             )
+        } else {
+            // Fallback (should be caught by CLI)
+            tracing::warn!("Unknown environment: {}, defaulting to flake", env_str);
+             (
+                "nix",
+                vec![
+                    "develop".to_string(),
+                    ".".to_string(),
+                    "--command".to_string(),
+                    "bash".to_string(),
+                ],
+            )
         };
-
-        let cmd_prog = "nix";
-        let cmd_args = vec![
-            "develop",
-            &flake_ref,
-            "--command",
-            "bash",
-        ];
 
         // Construct upterm host command
         let mut upterm_args = vec!["host".to_string()];
@@ -235,7 +277,7 @@ impl LocalComputeProvider {
         upterm_args.push("--".to_string());
         upterm_args.push(cmd_prog.to_string());
         for arg in cmd_args {
-            upterm_args.push(arg.to_string());
+            upterm_args.push(arg);
         }
 
         tracing::info!("Upterm args: github_user={:?}, allowed_users={:?}, public={}", github_user, allowed_users, public);
