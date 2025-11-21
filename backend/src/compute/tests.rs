@@ -145,7 +145,7 @@ async fn test_start_session_success() {
     
     assert!(calls.iter().any(|c| c.args.iter().any(|a| a.contains("command -v nix"))));
     assert!(calls.iter().any(|c| c.cmd == "git" && c.args[0] == "clone"));
-    assert!(calls.iter().any(|c| c.args.iter().any(|a| a.contains("upterm host"))));
+    assert!(calls.iter().any(|c| c.args.iter().any(|a| a.contains("--authorized-keys"))));
 }
 
 #[tokio::test]
@@ -207,9 +207,29 @@ Run 'upterm session current' to display this screen again
     let cursor = Box::new(std::io::Cursor::new(output));
     let result = crate::compute::local_provider::capture_upterm_invite(cursor).await;
     assert!(result.is_ok());
-    let (pid, invite) = result.unwrap();
+    let (pid, invite, _remaining) = result.unwrap();
     assert_eq!(pid, None);
     assert_eq!(invite, "ssh BFO1HH1sZDg28RvdWpam:MTc4MTFlNDBjZTk0ZTgudm0udXB0ZXJtLmludGVrbmFsOjIyMjI=@uptermd.upterm.dev");
+}
+
+#[tokio::test]
+async fn test_capture_upterm_invite_parsing_new_format() {
+    let output = "
+│ Command:         │ bash -c echo 'Session started'; sleep 30             │
+│ Force Command:   │ n/a                                                  │
+│ Host:            │ ssh://uptermd.upterm.dev:22                          │
+│ Authorized Keys: │ /tmp/secure_keys_direct/authorized_keys:             │
+│                  │ - SHA256:z6jj++GQTO4xVebN4yTQXD5msN1o1XncTqPzK+Cy4rk │
+│                  │                                                      │
+│ ➤ SSH Command:   │ ssh FYjNpo96BizkITTpFfco@uptermd.upterm.dev          │
+└──────────────────┴──────────────────────────────────────────────────────┘
+";
+    let cursor = Box::new(std::io::Cursor::new(output));
+    let result = crate::compute::local_provider::capture_upterm_invite(cursor).await;
+    assert!(result.is_ok());
+    let (pid, invite, _remaining) = result.unwrap();
+    assert_eq!(pid, None);
+    assert_eq!(invite, "ssh FYjNpo96BizkITTpFfco@uptermd.upterm.dev");
 }
 
 #[tokio::test]

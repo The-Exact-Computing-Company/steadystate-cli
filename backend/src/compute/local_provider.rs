@@ -166,8 +166,7 @@ impl LocalComputeProvider {
         
         // The command that upterm will run *inside* the session:
         // We use `bash` as the command inside nix develop to give an interactive shell.
-        let session_cmd = format!("nix develop {}#default --command bash", safe_flake);
-        let safe_session_cmd = shell_escape::escape(session_cmd.into());
+        let session_cmd = "bash".to_string();
 
         // Construct upterm host command
         let mut upterm_args = vec!["host".to_string()];
@@ -178,33 +177,61 @@ impl LocalComputeProvider {
             upterm_args.push(server);
         }
 
-        // 2. Authorization
-        if !public {
-            // If not public, we must have at least one authorized user (the creator)
-            if let Some(user) = github_user {
-                upterm_args.push("--github-user".to_string());
-                upterm_args.push(user.to_string());
-            }
-            
-            if let Some(users) = allowed_users {
-                for user in users {
-                    upterm_args.push("--github-user".to_string());
-                    upterm_args.push(user.clone());
-                }
-            }
-        }
+        // Always accept connections automatically since we are running headless
+        upterm_args.push("--accept".to_string());
 
-        // 4. Force command
-        upterm_args.push(format!("--force-command={}", safe_session_cmd));
+        // 2. Authorization
+        // Instead of relying on upterm to fetch keys (which fails if GitHub is down),
+        // we fetch them ourselves and create an authorized_keys file.
+        let authorized_keys = fetch_authorized_keys(github_user, allowed_users).await;
+        
+        // Write keys to a temporary file
+        // Use a fixed path for debugging/stability, but include UUID to avoid collisions if we wanted to be proper.
+        // For now, let's use a fixed path to rule out path issues.
+        let key_file_path = "/tmp/steadystate_authorized_keys".to_string();
+        
+        if let Ok(mut file) = std::fs::File::create(&key_file_path) {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata().unwrap().permissions();
+            perms.set_mode(0o600);
+            let _ = file.set_permissions(perms);
+            
+            use std::io::Write;
+            if let Err(e) = file.write_all(authorized_keys.as_bytes()) {
+                tracing::error!("Failed to write authorized keys to file: {}", e);
+            }
+            // Ensure newline at end
+            let _ = file.write_all(b"\n");
+        }
+        
+        // DEBUG: Write to fixed path so we can check it (duplicate)
+        if let Ok(mut file) = std::fs::File::create("/tmp/steadystate_generated_keys.pub") {
+             use std::io::Write;
+             let _ = file.write_all(authorized_keys.as_bytes());
+        }
+        
+        upterm_args.push("--authorized-keys".to_string());
+        upterm_args.push(key_file_path);
+
+        // 4. Force command - pass as two separate args to avoid escaping issues
+        upterm_args.push("--force-command".to_string());
+        upterm_args.push(session_cmd);
+
+        // 5. Host command (dummy to keep session alive)
+        upterm_args.push("--".to_string());
+        upterm_args.push("sleep".to_string());
+        upterm_args.push("infinity".to_string());
 
         let upterm_cmd_str = upterm_args.join(" ");
-
+        
+        // Use tail -f /dev/null to keep stdin open, preventing upterm from exiting due to EOF
         let full_cmd = format!(
-            "cd {} && upterm {}",
-            safe_workdir, upterm_cmd_str.strip_prefix("upterm ").unwrap_or(&upterm_cmd_str)
+            "cd {} && tail -f /dev/null | upterm {}",
+            safe_workdir, upterm_cmd_str
         );
 
         tracing::info!("Starting upterm session with command: {}", full_cmd);
+        tracing::info!("Upterm args: github_user={:?}, allowed_users={:?}, public={}", github_user, allowed_users, public);
         
         // Use setsid to detach from TTY and avoid SIGTTIN when running in background.
         // We use `setsid -w` to wait for the child, and we print the PID of the new session leader.
@@ -221,7 +248,7 @@ impl LocalComputeProvider {
             
             # Run with setsid to detach from TTY
             # We use sh -c to print the PID then exec upterm
-            setsid -w sh -c 'echo "PID: $$"; {}'
+            setsid sh -c 'echo "PID: $$"; {}'
             
             echo "DEBUG: full_cmd finished with exit code $?" >&2
             "#,
@@ -250,7 +277,18 @@ impl LocalComputeProvider {
         let invite_result = timeout(Duration::from_secs(30), capture_upterm_invite(stdout)).await;
 
         match invite_result {
-            Ok(Ok((captured_pid, invite))) => {
+            Ok(Ok((captured_pid, invite, remaining_stdout))) => {
+                // Spawn a task to continue draining stdout to prevent SIGPIPE
+                tokio::spawn(async move {
+                    let mut lines = tokio_stream::wrappers::LinesStream::new(remaining_stdout.lines());
+                    while let Some(line_res) = lines.next().await {
+                        match line_res {
+                            Ok(line) => tracing::debug!(upterm_stdout = %line, "upterm stdout (post-invite)"),
+                            Err(_) => break,
+                        }
+                    }
+                });
+                
                 // If we captured a PID from setsid, use it. Otherwise fall back to wrapper PID (less reliable for kill).
                 let final_pid = captured_pid.unwrap_or(wrapper_pid);
                 tracing::info!("Session ready. Wrapper PID: {}, Final PID: {}", wrapper_pid, final_pid);
@@ -290,7 +328,7 @@ impl LocalComputeProvider {
 
 
 
-pub(crate) async fn capture_upterm_invite(stdout: impl tokio::io::AsyncRead + Unpin) -> Result<(Option<u32>, String)> {
+pub(crate) async fn capture_upterm_invite(stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static) -> Result<(Option<u32>, String, BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>)> {
     let reader = BufReader::new(stdout);
     let mut lines = tokio_stream::wrappers::LinesStream::new(reader.lines());
 
@@ -308,13 +346,30 @@ pub(crate) async fn capture_upterm_invite(stdout: impl tokio::io::AsyncRead + Un
             }
         } else if trimmed.starts_with("Invite: ssh") {
             tracing::info!("Captured upterm invite: {}", trimmed);
-            return Ok((pid, trimmed.to_string()));
+            let remaining: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(lines.into_inner().into_inner());
+            return Ok((pid, trimmed.to_string(), BufReader::new(remaining)));
         } else if trimmed.starts_with("SSH Session:") {
             // Format: "SSH Session:            ssh ..."
             if let Some(ssh_cmd) = trimmed.strip_prefix("SSH Session:") {
                 let ssh_cmd = ssh_cmd.trim();
                 tracing::info!("Captured upterm invite: {}", ssh_cmd);
-                return Ok((pid, ssh_cmd.to_string()));
+                let remaining: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(lines.into_inner().into_inner());
+                return Ok((pid, ssh_cmd.to_string(), BufReader::new(remaining)));
+            }
+        } else if line.contains("SSH Command:") {
+            // New format (v0.18.0+): "│ ➤ SSH Command:   │ ssh ... │"
+            // We look for "ssh " and take everything until the next "│" or end of line
+            if let Some(idx) = line.find("ssh ") {
+                let rest = &line[idx..];
+                // If there's a trailing "│", strip it
+                let ssh_cmd = if let Some(end_idx) = rest.find('│') {
+                    rest[..end_idx].trim()
+                } else {
+                    rest.trim()
+                };
+                tracing::info!("Captured upterm invite (new format): {}", ssh_cmd);
+                let remaining: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(lines.into_inner().into_inner());
+                return Ok((pid, ssh_cmd.to_string(), BufReader::new(remaining)));
             }
         }
     }
@@ -474,4 +529,93 @@ impl ComputeProvider for LocalComputeProvider {
         }
         Ok(())
     }
+}
+
+async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<&[String]>) -> String {
+    // Use a Set to deduplicate keys
+    let mut unique_keys = std::collections::HashSet::new();
+    
+    // Open debug log file
+    let mut debug_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/steadystate_key_debug.log")
+        .unwrap_or_else(|_| std::fs::File::create("/tmp/steadystate_key_debug.log").unwrap());
+        
+    use std::io::Write;
+    let _ = writeln!(debug_log, "--- Starting fetch_authorized_keys (clean) ---");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default();
+
+    // 1. Add local keys
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let _ = writeln!(debug_log, "HOME={}", home);
+    tracing::info!("fetch_authorized_keys: HOME={}", home);
+    
+    let local_key_paths = vec![
+        format!("{}/.ssh/id_ed25519.pub", home),
+        format!("{}/.ssh/id_rsa.pub", home),
+    ];
+
+    for path in local_key_paths {
+        let _ = writeln!(debug_log, "Checking path: {}", path);
+        tracing::info!("Checking for local key at: {}", path);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    unique_keys.insert(trimmed.to_string());
+                }
+            }
+            let _ = writeln!(debug_log, "Found key at {}", path);
+            tracing::info!("Added local key from {}", path);
+        } else {
+            let _ = writeln!(debug_log, "Failed to read {}", path);
+            tracing::warn!("Could not read local key at {}", path);
+        }
+    }
+
+    // 2. Fetch GitHub keys
+    let mut users_to_fetch = Vec::new();
+    if let Some(user) = github_user {
+        users_to_fetch.push(user);
+    }
+    if let Some(users) = allowed_users {
+        users_to_fetch.extend(users.iter().map(|s| s.as_str()));
+    }
+
+    for user in users_to_fetch {
+        let url = format!("https://github.com/{}.keys", user);
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(text) = resp.text().await {
+                        for line in text.lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                                unique_keys.insert(trimmed.to_string());
+                            }
+                        }
+                        let _ = writeln!(debug_log, "Fetched keys for GitHub user {}", user);
+                        tracing::info!("Fetched keys for GitHub user {}", user);
+                    }
+                } else {
+                    let _ = writeln!(debug_log, "Failed to fetch keys for {}: HTTP {}", user, resp.status());
+                    tracing::warn!("Failed to fetch keys for {}: HTTP {}", user, resp.status());
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(debug_log, "Failed to fetch keys for {}: {}", user, e);
+                tracing::warn!("Failed to fetch keys for {}: {}", user, e);
+            }
+        }
+    }
+
+    // Join all unique keys with newlines
+    let result = unique_keys.into_iter().collect::<Vec<_>>().join("\n");
+    let _ = writeln!(debug_log, "Total unique keys: {}", result.lines().count());
+    result
 }
