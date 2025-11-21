@@ -69,6 +69,9 @@ enum Commands {
         /// Make the session public (anyone with the link can connect)
         #[arg(long)]
         public: bool,
+        /// Environment to load (e.g. "noenv")
+        #[arg(long)]
+        env: Option<String>,
     },
 }
 
@@ -159,7 +162,7 @@ async fn logout(client: &Client) -> Result<()> {
     Ok(())
 }
 
-async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, public: bool) -> Result<()> {
+async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, public: bool, env: Option<String>) -> Result<()> {
     Url::parse(&repo).context(
         "Invalid repository URL. Provide a fully-qualified URL (e.g. https://github.com/user/repo).",
     )?;
@@ -172,7 +175,8 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                 .json(&serde_json::json!({
                     "repo_url": repo.clone(),
                     "allowed_users": if allow.is_empty() { None } else { Some(allow.clone()) },
-                    "public": public
+                    "public": public,
+                    "environment": env.clone()
                 }))
         },
         None,
@@ -319,8 +323,8 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Up { repo, json, allow, public } => {
-            if let Err(e) = up(&client, repo, json, allow, public).await {
+        Commands::Up { repo, json, allow, public, env } => {
+            if let Err(e) = up(&client, repo, json, allow, public, env).await {
                 let msg = format!("{:#}", e);
                 let usage_error = msg.contains("Invalid repository URL.");
 

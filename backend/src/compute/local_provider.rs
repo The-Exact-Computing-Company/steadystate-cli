@@ -156,17 +156,48 @@ impl LocalComputeProvider {
         github_user: Option<&str>,
         allowed_users: Option<&[String]>,
         public: bool,
+        environment: Option<&str>,
     ) -> Result<(u32, String)> {
         // We run upterm from the host (backend environment), which wraps the nix develop session.
         // This ensures upterm is found (since it's in the host env) and the user lands in the nix dev shell.
         
+        // The command that upterm will run *inside* the session.
+        // We want to run this command in the `working_dir`.
+        // We will handle the directory change in the outer wrapper script.
+        
         // We use shell_escape to safely insert paths into the shell string.
         let safe_workdir = shell_escape::escape(working_dir.to_string_lossy().into());
-        let safe_flake = shell_escape::escape(flake_path.to_string_lossy().into());
+        // let safe_flake = shell_escape::escape(flake_path.to_string_lossy().into());
         
-        // The command that upterm will run *inside* the session:
-        // We use `bash` as the command inside nix develop to give an interactive shell.
-        let session_cmd = "bash".to_string();
+        // Choose flake based on --env flag
+        let flake_ref = if environment == Some("noenv") {
+            // Use curated minimal environment
+            tracing::info!("Using --env=noenv: minimal curated environment");
+            "github:The-Exact-Computing-Company/steadystate?dir=backend/flakes/noenv".to_string()
+        } else {
+            // Use repository's own flake
+            tracing::info!("Using repository's flake.nix");
+            let path_str = flake_path.to_string_lossy();
+            if path_str.starts_with("github:") {
+                path_str.to_string()
+            } else {
+                // For local testing: point to repo's flake
+                // We assume the flake is at the root of the repo (working_dir)
+                // or flake_path is already absolute/relative correct.
+                // The user's sketch used: format!("{}#{}", working_dir.display(), "")
+                // But flake_path passed to this function is already the path to the flake (or repo root).
+                // Let's use the absolute path to the directory containing flake.nix
+                format!("{}", flake_path.display())
+            }
+        };
+
+        let cmd_prog = "nix";
+        let cmd_args = vec![
+            "develop",
+            &flake_ref,
+            "--command",
+            "bash",
+        ];
 
         // Construct upterm host command
         let mut upterm_args = vec!["host".to_string()];
@@ -181,13 +212,9 @@ impl LocalComputeProvider {
         upterm_args.push("--accept".to_string());
 
         // 2. Authorization
-        // Instead of relying on upterm to fetch keys (which fails if GitHub is down),
-        // we fetch them ourselves and create an authorized_keys file.
         let authorized_keys = fetch_authorized_keys(github_user, allowed_users).await;
         
         // Write keys to a temporary file
-        // Use a fixed path for debugging/stability, but include UUID to avoid collisions if we wanted to be proper.
-        // For now, let's use a fixed path to rule out path issues.
         let key_file_path = "/tmp/steadystate_authorized_keys".to_string();
         
         if let Ok(mut file) = std::fs::File::create(&key_file_path) {
@@ -200,64 +227,56 @@ impl LocalComputeProvider {
             if let Err(e) = file.write_all(authorized_keys.as_bytes()) {
                 tracing::error!("Failed to write authorized keys to file: {}", e);
             }
-            // Ensure newline at end
             let _ = file.write_all(b"\n");
-        }
-        
-        // DEBUG: Write to fixed path so we can check it (duplicate)
-        if let Ok(mut file) = std::fs::File::create("/tmp/steadystate_generated_keys.pub") {
-             use std::io::Write;
-             let _ = file.write_all(authorized_keys.as_bytes());
         }
         
         upterm_args.push("--authorized-keys".to_string());
         upterm_args.push(key_file_path);
 
-        // 4. Force command - pass as two separate args to avoid escaping issues
-        upterm_args.push("--force-command".to_string());
-        upterm_args.push(session_cmd);
-
-        // 5. Host command (dummy to keep session alive)
+        // 5. Host command
+        // upterm host [flags] -- <command> [args...]
         upterm_args.push("--".to_string());
-        upterm_args.push("sleep".to_string());
-        upterm_args.push("infinity".to_string());
+        upterm_args.push(cmd_prog.to_string());
+        for arg in cmd_args {
+            upterm_args.push(arg.to_string());
+        }
 
-        let upterm_cmd_str = upterm_args.join(" ");
-        
-        // Use tail -f /dev/null to keep stdin open, preventing upterm from exiting due to EOF
-        let full_cmd = format!(
-            "cd {} && tail -f /dev/null | upterm {}",
-            safe_workdir, upterm_cmd_str
-        );
-
-        tracing::info!("Starting upterm session with command: {}", full_cmd);
         tracing::info!("Upterm args: github_user={:?}, allowed_users={:?}, public={}", github_user, allowed_users, public);
         
         // Use setsid to detach from TTY and avoid SIGTTIN when running in background.
-        // We use `setsid -w` to wait for the child, and we print the PID of the new session leader.
-        let nix_wrapper = format!(
-            r#"
+        // We use `setsid` to create a new session.
+        // We pipe `tail -f /dev/null` to `upterm` to keep it alive (prevent EOF on stdin).
+        // We use a wrapper shell script to handle the pipe and setsid while passing arguments safely.
+        // We also cd into the working directory here.
+        let wrapper_script = r#"
             if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
               . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
             fi
-            echo "DEBUG: Wrapper started, running full_cmd..." >&2
-            echo "DEBUG: PATH=$PATH" >&2
             unset SSH_ASKPASS
             unset DISPLAY
             unset SSH_AUTH_SOCK
             
-            # Run with setsid to detach from TTY
-            # We use sh -c to print the PID then exec upterm
-            setsid sh -c 'echo "PID: $$"; {}'
+            WORK_DIR="$1"
+            shift
             
-            echo "DEBUG: full_cmd finished with exit code $?" >&2
-            "#,
-            full_cmd
-        );
+            cd "$WORK_DIR" || exit 1
+            
+            # Execute setsid with a helper shell that sets up the pipe and executes the args
+            # "$@" contains the upterm command and its arguments
+            exec setsid sh -c 'echo "PID: $$"; tail -f /dev/null | exec "$@"' -- "$@"
+        "#;
         
-        tracing::info!("Spawning upterm command...");
-        let (wrapper_pid, stdout, stderr) = self.executor.run_capture("sh", &["-c", &nix_wrapper]).await
-            .context("Failed to spawn nix develop/upterm")?;
+        // Convert args to &str
+        let upterm_args_str: Vec<&str> = upterm_args.iter().map(|s| s.as_str()).collect();
+        
+        // Construct the full arguments for the outer sh
+        // sh -c script -- workdir upterm [args...]
+        let mut full_args = vec!["-c", wrapper_script, "--", safe_workdir.as_ref(), "upterm"];
+        full_args.extend(upterm_args_str);
+        
+        tracing::info!("Spawning upterm command via wrapper...");
+        let (wrapper_pid, stdout, stderr) = self.executor.run_capture("sh", &full_args).await
+            .context("Failed to spawn upterm wrapper")?;
 
         tracing::info!("Upterm wrapper spawned with PID {}", wrapper_pid);
 
@@ -501,7 +520,8 @@ impl ComputeProvider for LocalComputeProvider {
             &repo_path,
             github_login.as_deref(),
             request.allowed_users.as_deref(),
-            request.public
+            request.public,
+            request.environment.as_deref(),
         ).await?;
         
         // Store session state (PID) so we can kill it later.
