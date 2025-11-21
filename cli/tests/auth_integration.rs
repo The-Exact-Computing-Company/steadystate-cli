@@ -88,6 +88,11 @@ mod helpers {
             let mut cmd = Command::new(env!("CARGO_BIN_EXE_steadystate"));
             cmd.env("STEADYSTATE_CONFIG_DIR", self.tempdir.path());
             cmd.env("STEADYSTATE_BACKEND", &self.server_url);
+
+            let tokens_dir = self.tempdir.path().join("tokens");
+            fs::create_dir_all(&tokens_dir).expect("create tokens dir");
+            cmd.env("STEADYSTATE_TEST_TOKENS_DIR", tokens_dir);
+
             cmd.args(args);
             cmd.output().expect("run steadystate cli")
         }
@@ -115,7 +120,10 @@ mod helpers {
         }
 
         pub fn set_keyring_password(&self, username: &str, password: &str) {
-            keyring::Entry::new("steadystate", username).unwrap().set_password(password).unwrap();
+            let dir = self.tempdir.path().join("tokens");
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(username);
+            fs::write(path, password).unwrap();
         }
     }
 
@@ -158,13 +166,13 @@ fn up_refreshes_proactively_when_jwt_expired() {
         // Proactive refresh call
         MockResponse::Json(json!({ "jwt": "fresh-jwt-123" })),
         // Session creation call
-        MockResponse::Json(json!({ "id": "session-xyz", "ssh_url": "ssh://fresh" })),
+        MockResponse::Json(json!({ "id": "session-xyz", "state": "Running", "endpoint": "ssh://fresh", "message": null, "compute_provider": "local" })),
     ];
     let mut harness = TestHarness::new(script);
     harness.create_expired_session();
     harness.set_keyring_password("tester", "refresh-token-abc");
 
-    let (out, reqs) = harness.run_cli_and_assert_success(&["up", "https://github.com/example/repo"]);
+    let (out, reqs) = harness.run_cli_and_assert_success(&["up", "https://github.com/example/repo", "--env=noenv"]);
 
     assert_eq!(reqs.len(), 2);
     assert!(reqs[0].starts_with("POST /auth/refresh"));
@@ -183,7 +191,7 @@ fn up_errors_gracefully_if_server_returns_401() {
     harness.create_future_session(); // Create a session with a non-expired JWT
 
     // Run the CLI but don't assert success
-    let output = harness.run_cli(&["up", "https://github.com/example/repo"]);
+    let output = harness.run_cli(&["up", "https://github.com/example/repo", "--env=noenv"]);
     harness.join_server();
 
     // Assert that the command failed as expected
@@ -217,6 +225,8 @@ fn logout_removes_session_and_revokes_refresh() {
     assert!(reqs[0].starts_with("POST /auth/revoke"));
     let json_path = harness.tempdir.path().join("steadystate/session.json");
     assert!(!json_path.exists());
-    let res = keyring::Entry::new("steadystate", "tester").unwrap().get_password();
-    assert!(res.is_err());
+
+    let tokens_dir = harness.tempdir.path().join("tokens");
+    let token_path = tokens_dir.join("tester");
+    assert!(!token_path.exists());
 }

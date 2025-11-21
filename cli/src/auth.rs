@@ -37,7 +37,9 @@ struct PollResponse {
 #[derive(Deserialize, Serialize)]
 pub struct UpResponse {
     pub id: String,
-    pub ssh_url: String,
+    pub state: String,
+    pub endpoint: Option<String>,
+    pub message: Option<String>,
 }
 
 /// Initiates OAuth device flow authentication.
@@ -264,9 +266,11 @@ where
         .context("API request failed")?;
 
     // Step 4: If backend returns 401 → fail clearly, do not retry
+    // Step 4: If backend returns 401 → fail clearly, do not retry
     if resp.status().as_u16() == 401 {
+        let body = resp.text().await.unwrap_or_default();
         anyhow::bail!(
-            "Your session has expired or been revoked. Run `steadystate login` again."
+            "Your session has expired or been revoked. Run `steadystate login` again.\nServer says: {}", body
         );
     }
 
@@ -315,6 +319,13 @@ pub async fn store_refresh_token(username: &str, token: &str) -> Result<()> {
     if token.is_empty() {
         return Err(anyhow!("refresh token cannot be empty"));
     }
+
+    if let Ok(dir) = std::env::var("STEADYSTATE_TEST_TOKENS_DIR") {
+        let path = std::path::Path::new(&dir).join(username);
+        tokio::fs::write(path, token).await.context("failed to write test token")?;
+        return Ok(());
+    }
+
     let username = username.to_string();
     let token = token.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -329,6 +340,15 @@ pub async fn store_refresh_token(username: &str, token: &str) -> Result<()> {
 
 /// Retrieves refresh token from keychain if present.
 pub async fn get_refresh_token(username: &str) -> Result<Option<String>> {
+    if let Ok(dir) = std::env::var("STEADYSTATE_TEST_TOKENS_DIR") {
+        let path = std::path::Path::new(&dir).join(username);
+        match tokio::fs::read_to_string(path).await {
+            Ok(token) => return Ok(Some(token)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(anyhow::Error::new(e).context("failed to read test token")),
+        }
+    }
+
     let username = username.to_string();
     tokio::task::spawn_blocking(move || -> Result<Option<String>> {
         let entry = Entry::new(SERVICE_NAME, &username).context("keyring entry creation failed")?;
@@ -346,6 +366,12 @@ pub async fn get_refresh_token(username: &str) -> Result<Option<String>> {
 
 /// Deletes refresh token from keychain if present.
 pub async fn delete_refresh_token(username: &str) -> Result<()> {
+    if let Ok(dir) = std::env::var("STEADYSTATE_TEST_TOKENS_DIR") {
+        let path = std::path::Path::new(&dir).join(username);
+        let _ = tokio::fs::remove_file(path).await;
+        return Ok(());
+    }
+
     let username = username.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
         if let Ok(entry) = Entry::new(SERVICE_NAME, &username) {
@@ -410,6 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform_refresh_without_refresh_token() {
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
         let ctx = TestContext::new();
         let client = Client::builder().pool_max_idle_per_host(0).build().unwrap();
 
