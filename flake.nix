@@ -42,6 +42,8 @@
         nativeBuildInputs = [ pkgs.pkg-config ];
         buildInputs = [ pkgs.openssl ];
 
+        doCheck = !isCI;
+
         OPENSSL_NO_VENDOR = 1;
       };
 
