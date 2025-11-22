@@ -44,6 +44,7 @@ once_cell = "1.19"
 
 # File locking for session management
 fs2 = "0.4"
+url = "2.5"
 
 [dev-dependencies]
 tempfile = "3.10"

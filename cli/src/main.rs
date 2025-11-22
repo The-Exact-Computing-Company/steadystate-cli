@@ -8,6 +8,8 @@
 mod auth;
 mod config;
 mod session;
+mod sync;
+mod notify;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -76,6 +78,15 @@ enum Commands {
         #[arg(long)]
         mode: Option<String>,
     },
+    /// Join a remote session using a magic link or SSH URL
+    Join {
+        /// Magic link (steadystate://...) or SSH URL
+        url: String,
+    },
+    /// Synchronize changes with other users (Collaboration Mode)
+    Sync,
+    /// Watch for sync events (Collaboration Mode)
+    Watch,
 }
 
 #[derive(Serialize)]
@@ -301,11 +312,179 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                 }
             }
         } else if let Some(endpoint) = resp.endpoint {
+            println!("✅ Session ready!");
             println!("SSH: {}", endpoint);
+            
+            if mode_val == "collab" {
+                println!("Launching dashboard...");
+                // Parse endpoint to get host/port/user
+                // Endpoint is ssh://steady@host:port
+                // We want to run: ssh -t -p port steady@host "steadystate watch"
+                
+                if let Ok(url) = Url::parse(&endpoint) {
+                    let host = url.host_str().unwrap_or("localhost");
+                    let port = url.port().unwrap_or(22);
+                    let user = url.username();
+                    
+                    let mut args = vec![
+                        "-p".to_string(),
+                        port.to_string(),
+                        "-t".to_string(), // Force PTY for TUI
+                        "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+                        "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+                    ];
+                    
+                    let target = if !user.is_empty() {
+                        format!("{}@{}", user, host)
+                    } else {
+                        host.to_string()
+                    };
+                    args.push(target);
+                    
+                    // Command to run
+                    args.push("steadystate watch".to_string());
+                    
+                    println!("Connecting to dashboard...");
+                    use std::os::unix::process::CommandExt;
+                    let err = std::process::Command::new("ssh")
+                        .args(&args)
+                        .exec();
+                    return Err(anyhow::anyhow!("Failed to execute ssh: {}", err));
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+async fn join(url_str: String) -> Result<()> {
+    if url_str.starts_with("steadystate://") {
+        let url = Url::parse(&url_str).context("Failed to parse magic link")?;
+        
+        let mode = url.host_str().ok_or_else(|| anyhow::anyhow!("Invalid magic link: missing mode"))?;
+        
+        match mode {
+            "pair" => {
+                // Extract upterm param
+                let mut pairs = url.query_pairs();
+                let upterm_url = pairs
+                    .find(|(key, _)| key == "upterm")
+                    .map(|(_, val)| val.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("Invalid pair link: missing 'upterm' parameter"))?;
+                
+                println!("Joining pair session...");
+                println!("Connecting to: {}", upterm_url);
+                
+                // Execute ssh
+                let up_url = Url::parse(&upterm_url).context("Failed to parse upterm URL")?;
+                let host = up_url.host_str().ok_or_else(|| anyhow::anyhow!("Missing host in upterm URL"))?;
+                let port = up_url.port().unwrap_or(22);
+                let user = up_url.username();
+                
+                let mut args = vec![
+                    "-p".to_string(),
+                    port.to_string(),
+                    "-o".to_string(),
+                    "StrictHostKeyChecking=no".to_string(), // For ephemeral hosts
+                    "-o".to_string(),
+                    "UserKnownHostsFile=/dev/null".to_string(),
+                    "-t".to_string(), // Force PTY
+                ];
+                
+                if !user.is_empty() {
+                    args.push(format!("{}@{}", user, host));
+                } else {
+                    args.push(host.to_string());
+                }
+                
+                use std::os::unix::process::CommandExt;
+                let err = std::process::Command::new("ssh")
+                    .args(&args)
+                    .exec();
+                    
+                return Err(anyhow::anyhow!("Failed to execute ssh: {}", err));
+            }
+            "collab" => {
+                // Extract ssh param
+                let mut pairs = url.query_pairs();
+                let ssh_url = pairs
+                    .find(|(key, _)| key == "ssh")
+                    .map(|(_, val)| val.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("Invalid collab link: missing 'ssh' parameter"))?;
+                
+                println!("Joining collaboration session...");
+                println!("Connecting to: {}", ssh_url);
+                
+                // Execute ssh
+                let up_url = Url::parse(&ssh_url).context("Failed to parse SSH URL")?;
+                let host = up_url.host_str().ok_or_else(|| anyhow::anyhow!("Missing host in SSH URL"))?;
+                let port = up_url.port().unwrap_or(22);
+                let user = up_url.username();
+                
+                let mut args = vec![
+                    "-p".to_string(),
+                    port.to_string(),
+                    "-o".to_string(),
+                    "StrictHostKeyChecking=no".to_string(), // For ephemeral hosts
+                    "-o".to_string(),
+                    "UserKnownHostsFile=/dev/null".to_string(),
+                    "-t".to_string(), // Force PTY
+                ];
+                
+                if !user.is_empty() {
+                    args.push(format!("{}@{}", user, host));
+                } else {
+                    args.push(host.to_string());
+                }
+                
+                use std::os::unix::process::CommandExt;
+                let err = std::process::Command::new("ssh")
+                    .args(&args)
+                    .exec();
+                    
+                return Err(anyhow::anyhow!("Failed to execute ssh: {}", err));
+            }
+            _ => {
+                return Err(anyhow::anyhow!("Unknown mode: {}", mode));
+            }
+        }
+    } else {
+        // Legacy/Direct SSH URL
+        println!("Joining via direct SSH...");
+        
+        if url_str.starts_with("ssh://") {
+             let up_url = Url::parse(&url_str).context("Failed to parse SSH URL")?;
+             let host = up_url.host_str().ok_or_else(|| anyhow::anyhow!("Missing host in SSH URL"))?;
+             let port = up_url.port().unwrap_or(22);
+             let user = up_url.username();
+             
+             let mut args = vec![
+                "-p".to_string(),
+                port.to_string(),
+                "-t".to_string(),
+            ];
+             
+             if !user.is_empty() {
+                args.push(format!("{}@{}", user, host));
+            } else {
+                args.push(host.to_string());
+            }
+            
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new("ssh")
+                .args(&args)
+                .exec();
+            return Err(anyhow::anyhow!("Failed to execute ssh: {}", err));
+        } else {
+            // Assume it's valid ssh arg
+             use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new("ssh")
+                .arg(&url_str)
+                .exec();
+            return Err(anyhow::anyhow!("Failed to execute ssh: {}", err));
+        }
+    }
 }
 
 #[tokio::main]
@@ -395,6 +574,24 @@ async fn main() -> Result<()> {
                     eprintln!("up failed: {}", msg);
                 }
 
+                std::process::exit(1);
+            }
+        }
+        Commands::Join { url } => {
+             if let Err(e) = join(url).await {
+                eprintln!("join failed: {:#}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Sync => {
+            if let Err(e) = sync::sync() {
+                eprintln!("sync failed: {:#}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Watch => {
+            if let Err(e) = notify::watch() {
+                eprintln!("watch failed: {:#}", e);
                 std::process::exit(1);
             }
         }

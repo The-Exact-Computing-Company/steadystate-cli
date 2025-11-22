@@ -119,6 +119,7 @@ async fn test_start_session_success() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {
@@ -175,6 +176,7 @@ async fn test_terminate_session() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
     let request = SessionRequest { 
         repo_url: "repo".into(),
@@ -257,6 +259,7 @@ async fn test_start_session_git_failure() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {
@@ -298,6 +301,7 @@ async fn test_start_session_upterm_failure() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {
@@ -340,6 +344,7 @@ async fn test_start_session_nix_failure() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {

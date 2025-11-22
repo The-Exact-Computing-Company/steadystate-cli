@@ -137,6 +137,74 @@ impl LocalComputeProvider {
         Ok(())
     }
 
+    async fn ensure_pijul_installed(&self) -> Result<()> {
+        // 1. Check if pijul is already in PATH
+        let status = self.executor.run_status("sh", &["-c", "command -v pijul >/dev/null 2>&1"]).await
+            .context("Failed to check for pijul")?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        tracing::info!("Pijul not found; installing...");
+        
+        // 2. Install Pijul (using cargo for now, or a pre-built binary if available)
+        // For reliability in this environment, let's assume cargo is available or try a static binary.
+        // Since we are in a dev environment, let's try cargo install if cargo exists, else fail.
+        
+        let cargo_check = self.executor.run_status("sh", &["-c", "command -v cargo >/dev/null 2>&1"]).await?;
+        if cargo_check.success() {
+             let status = self.executor.run_status("cargo", &["install", "pijul"]).await
+                .context("Failed to install pijul via cargo")?;
+             if !status.success() {
+                 return Err(anyhow!("Failed to install pijul via cargo"));
+             }
+             Ok(())
+        } else {
+            // Fallback: try to download a static binary or fail
+            // For now, fail with a helpful message
+            Err(anyhow!("Pijul not found and cargo not available to install it. Please install pijul."))
+        }
+    }
+
+    async fn init_pijul_repo(&self, repo_path: &Path) -> Result<()> {
+        tracing::info!("Initializing Pijul repository at {}", repo_path.display());
+        
+        let path_str = repo_path.to_str().ok_or_else(|| anyhow!("Invalid path"))?;
+        
+        // pijul init
+        let status = self.executor.run_status("pijul", &["init", path_str]).await
+            .context("Failed to run pijul init")?;
+            
+        if !status.success() {
+            return Err(anyhow!("pijul init failed"));
+        }
+        
+        // Add all files
+        let _status = self.executor.run_status("pijul", &["add", "-r", "."], ).await; // Run inside the dir?
+        // run_status doesn't support cwd. We need to run shell or use -C if pijul supports it.
+        // pijul doesn't seem to have a global -C flag in all versions, but let's try running via sh -c cd ...
+        
+        let add_cmd = format!("cd {} && pijul add -r .", shell_escape::escape(path_str.into()));
+        let status = self.executor.run_shell(&add_cmd).await
+            .context("Failed to run pijul add")?;
+
+        if !status.success() {
+             return Err(anyhow!("pijul add failed"));
+        }
+
+        // Record initial state
+        let record_cmd = format!("cd {} && pijul record -a -m 'Initial import' --author 'SteadyState <bot@steadystate.dev>'", shell_escape::escape(path_str.into()));
+        let status = self.executor.run_shell(&record_cmd).await
+            .context("Failed to run pijul record")?;
+            
+        if !status.success() {
+             return Err(anyhow!("pijul record failed"));
+        }
+
+        Ok(())
+    }
+
     async fn clone_repo(&self, repo_url: &str, dest: &Path) -> Result<()> {
         tracing::info!("Cloning repo {} into {}", repo_url, dest.display());
         
@@ -265,10 +333,11 @@ impl LocalComputeProvider {
             let _ = file.set_permissions(perms);
             
             use std::io::Write;
-            if let Err(e) = file.write_all(authorized_keys.as_bytes()) {
-                tracing::error!("Failed to write authorized keys to file: {}", e);
+            for ak in &authorized_keys {
+                if let Err(e) = writeln!(file, "{}", ak.key) {
+                    tracing::error!("Failed to write key: {}", e);
+                }
             }
-            let _ = file.write_all(b"\n");
         }
         
         upterm_args.push("--authorized-keys".to_string());
@@ -529,14 +598,15 @@ impl ComputeProvider for LocalComputeProvider {
 
         // Check mode
         if let Some(mode) = &request.mode {
-            if mode == "collab" {
-                return Err(anyhow!("Collaboration mode (SSH) is not implemented yet"));
-            } else if mode != "pair" {
+            if mode != "pair" && mode != "collab" {
                 return Err(anyhow!("Invalid mode: {}", mode));
             }
         }
         
         self.ensure_nix_installed().await?;
+        if request.mode.as_deref() == Some("collab") {
+            self.ensure_pijul_installed().await?;
+        }
         
         let (workspace_root, repo_path) = self.create_workspace(&session.id)?;
         
@@ -566,22 +636,114 @@ impl ComputeProvider for LocalComputeProvider {
              }
         }
 
-        let (pid, invite) = self.launch_upterm_in_noenv(
-            &self.flake_path, 
-            &repo_path,
-            github_login.as_deref(),
-            request.allowed_users.as_deref(),
-            request.public,
-            request.environment.as_deref(),
-            &session.id,
-        ).await?;
+        // Initialize Pijul if in collab mode
+        if request.mode.as_deref() == Some("collab") {
+            self.init_pijul_repo(&repo_path).await?;
+        }
+
+        let (pid, invite) = if request.mode.as_deref() == Some("collab") {
+            self.launch_sshd_for_collab(
+                &repo_path,
+                github_login.as_deref(),
+                request.allowed_users.as_deref(),
+                &session.id,
+            ).await?
+        } else {
+            self.launch_upterm_in_noenv(
+                &self.flake_path, 
+                &repo_path,
+                github_login.as_deref(),
+                request.allowed_users.as_deref(),
+                request.public,
+                request.environment.as_deref(),
+                &session.id,
+            ).await?
+        };
         
+        // Create sync-log file
+        let sync_log_path = workspace_root.join("sync-log");
+        if let Err(e) = std::fs::File::create(&sync_log_path) {
+            tracing::warn!("Failed to create sync-log at {}: {}", sync_log_path.display(), e);
+        } else {
+            // Set permissions to 666 so all users can write to it
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&sync_log_path, std::fs::Permissions::from_mode(0o666)) {
+                 tracing::warn!("Failed to set permissions on sync-log: {}", e);
+            }
+        }
+
         // Store session state (PID) so we can kill it later.
         self.state.live_sessions.insert(session.id.clone(), LocalSession { pid, workspace_root });
         
         // Update the session model that will be returned to the user.
         session.state = SessionState::Running;
-        session.endpoint = Some(invite);
+        session.endpoint = Some(invite.clone());
+
+        // Generate Magic Link
+        let magic_link = if let Some(mode) = &request.mode {
+            if mode == "pair" {
+                // Parse Upterm URL to extract host/port/user if needed, or just wrap it.
+                // Upterm invite: ssh://<user>:<pass>@<host>:<port>
+                // We want: steadystate://pair/<session-id>-steady@<host>:<port>?upterm=<encoded-invite>
+                
+                // Simple parsing to extract host (for display/consistency)
+                // If parsing fails, fallback to a generic host
+                let (host, port) = if let Some(stripped) = invite.strip_prefix("ssh://") {
+                    if let Some(at_pos) = stripped.find('@') {
+                        let host_part = &stripped[at_pos+1..];
+                        if let Some(colon_pos) = host_part.find(':') {
+                            (host_part[..colon_pos].to_string(), Some(host_part[colon_pos+1..].to_string()))
+                        } else {
+                            (host_part.to_string(), Some("22".to_string()))
+                        }
+                    } else {
+                        ("unknown-host".to_string(), Some("22".to_string()))
+                    }
+                } else {
+                    ("unknown-host".to_string(), Some("22".to_string()))
+                };
+
+                let upterm_encoded = url::form_urlencoded::byte_serialize(invite.as_bytes()).collect::<String>();
+                let port_str = port.map(|p| format!(":{}", p)).unwrap_or_default();
+                
+                Some(format!(
+                    "steadystate://pair/{}-steady@{}{}?upterm={}",
+                    session.id, host, port_str, upterm_encoded
+                ))
+            } else if mode == "collab" {
+                 // invite is ssh://steady@localhost:port
+                 // We want: steadystate://collab/<session-id>@<host>:<port>?ssh=<encoded-invite>
+                 
+                 let (host, port) = if let Some(stripped) = invite.strip_prefix("ssh://") {
+                    if let Some(at_pos) = stripped.find('@') {
+                        let host_part = &stripped[at_pos+1..];
+                        if let Some(colon_pos) = host_part.find(':') {
+                            (host_part[..colon_pos].to_string(), Some(host_part[colon_pos+1..].to_string()))
+                        } else {
+                            (host_part.to_string(), Some("22".to_string()))
+                        }
+                    } else {
+                        ("unknown-host".to_string(), Some("22".to_string()))
+                    }
+                } else {
+                    ("unknown-host".to_string(), Some("22".to_string()))
+                };
+
+                let ssh_encoded = url::form_urlencoded::byte_serialize(invite.as_bytes()).collect::<String>();
+                let port_str = port.map(|p| format!(":{}", p)).unwrap_or_default();
+                
+                Some(format!(
+                    "steadystate://collab/{}@{}{}?ssh={}",
+                    session.id, host, port_str, ssh_encoded
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        session.magic_link = magic_link;
         
         Ok(())
     }
@@ -605,11 +767,163 @@ impl ComputeProvider for LocalComputeProvider {
         }
         Ok(())
     }
+    }
+
+
+    impl LocalComputeProvider {
+    async fn launch_sshd_for_collab(
+        &self,
+        repo_path: &Path,
+        github_user: Option<&str>,
+        allowed_users: Option<&[String]>,
+        session_id: &str,
+    ) -> Result<(u32, String)> {
+        tracing::info!("Launching SSHD for collab session {}", session_id);
+
+        // 1. Generate Host Keys
+        let host_key_path = format!("/tmp/steadystate_host_key_{}", session_id);
+        if !Path::new(&host_key_path).exists() {
+            let status = self.executor.run_status("ssh-keygen", &["-t", "ed25519", "-f", &host_key_path, "-N", ""]).await
+                .context("Failed to generate host key")?;
+            if !status.success() {
+                return Err(anyhow!("ssh-keygen failed"));
+            }
+        }
+
+        // 2. Copy steadystate binary to repo_path/bin
+        let bin_dir = repo_path.join("bin");
+        std::fs::create_dir_all(&bin_dir).context("Failed to create bin dir")?;
+        let current_exe = std::env::current_exe().context("Failed to get current exe")?;
+        let target_exe = bin_dir.join("steadystate");
+        std::fs::copy(&current_exe, &target_exe).context("Failed to copy steadystate binary")?;
+        
+        // 3. Prepare Authorized Keys with ForceCommand
+        let authorized_keys = fetch_authorized_keys(github_user, allowed_users).await;
+        let auth_keys_path = format!("/tmp/steadystate_collab_keys_{}", session_id);
+        
+        // Create wrapper script
+        let wrapper_path = format!("/tmp/steadystate_wrapper_{}.sh", session_id);
+        let wrapper_content = format!(r#"#!/bin/sh
+USER_ID="$1"
+export REPO_ROOT="{}"
+export PATH="$REPO_ROOT/bin:$PATH"
+ACTIVE_USERS_FILE="$REPO_ROOT/active-users"
+
+# Add user to active-users
+echo "$USER_ID" >> "$ACTIVE_USERS_FILE"
+
+# Cleanup function
+cleanup() {{
+    # Remove user from active-users (using grep -v to filter out this user)
+    if [ -f "$ACTIVE_USERS_FILE" ]; then
+        grep -v "^$USER_ID$" "$ACTIVE_USERS_FILE" > "$ACTIVE_USERS_FILE.tmp"
+        mv "$ACTIVE_USERS_FILE.tmp" "$ACTIVE_USERS_FILE"
+    fi
+}}
+trap cleanup EXIT
+
+# Create worktree if not exists
+WORKTREE="$REPO_ROOT/worktrees/$USER_ID"
+if [ ! -d "$WORKTREE" ]; then
+    echo "Creating workspace for $USER_ID..."
+    mkdir -p "$REPO_ROOT/worktrees"
+    # Clone from canonical repo (which is REPO_ROOT)
+    # Note: Pijul clone syntax: pijul clone <remote> <path>
+    # Here remote is the local path
+    pijul clone "$REPO_ROOT" "$WORKTREE"
+fi
+
+cd "$WORKTREE" || exit 1
+echo "Welcome to SteadyState Collaboration Mode!"
+echo "You are in your personal workspace: $WORKTREE"
+echo "Changes are synced automatically."
+
+# Start shell (wait for it to finish so trap runs after)
+bash -l
+"#, repo_path.display());
+
+        std::fs::write(&wrapper_path, wrapper_content).context("Failed to write wrapper script")?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))?;
+
+        {
+            let mut file = std::fs::File::create(&auth_keys_path)?;
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata()?.permissions();
+            perms.set_mode(0o600);
+            file.set_permissions(perms)?;
+            
+            use std::io::Write;
+            for ak in &authorized_keys {
+                // command="wrapper.sh <user>" ssh-ed25519 ...
+                writeln!(file, "command=\"{} {}\" {}", wrapper_path, ak.user, ak.key)?;
+            }
+        }
+
+        // 4. Generate sshd_config
+        let config_path = format!("/tmp/steadystate_sshd_config_{}", session_id);
+        // Find a free port? For now, let's pick a random one or let sshd pick (port 0) and parse it?
+        // sshd -p 0 might not work as expected for reporting.
+        // Let's try to bind to port 0 and see if we can get the port.
+        // Actually, sshd doesn't output the chosen port easily.
+        // Let's pick a random port between 20000 and 30000.
+        let port = 20000 + (rand::random::<u16>() % 10000);
+        
+        let sshd_config = format!(r#"
+Port {}
+HostKey {}
+AuthorizedKeysFile {}
+PidFile /tmp/steadystate_sshd_{}.pid
+ChallengeResponseAuthentication no
+PasswordAuthentication no
+UsePAM no
+PrintMotd yes
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+"#, port, host_key_path, auth_keys_path, session_id);
+
+        std::fs::write(&config_path, sshd_config)?;
+
+        // 5. Spawn sshd
+        // We need absolute path to sshd. `which sshd`?
+        // Assume /usr/sbin/sshd or just sshd in path.
+        let sshd_cmd = "sshd";
+        let args = vec!["-f", &config_path, "-D", "-e"]; // -D: no detach, -e: log to stderr
+
+        tracing::info!("Spawning sshd on port {}", port);
+        let (pid, _, stderr) = self.executor.run_capture(sshd_cmd, &args.iter().map(|s| *s).collect::<Vec<_>>()).await
+            .context("Failed to spawn sshd")?;
+
+        // Spawn stderr logger
+        let stderr_reader = BufReader::new(stderr);
+        tokio::spawn(async move {
+            let mut lines = tokio_stream::wrappers::LinesStream::new(stderr_reader.lines());
+            while let Some(line_res) = lines.next().await {
+                 if let Ok(line) = line_res {
+                     tracing::debug!("SSHD STDERR: {}", line);
+                 }
+            }
+        });
+
+        // Return connection string
+        // Assuming we are reachable on localhost for now (tunneling is next step/out of scope for this specific task)
+        // But we need the public IP/hostname.
+        // For local dev, localhost is fine.
+        let invite = format!("ssh://steady@localhost:{}", port);
+        
+        Ok((pid, invite))
+    }
 }
 
-async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<&[String]>) -> String {
+struct AuthorizedKey {
+    user: String,
+    key: String,
+}
+
+async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<&[String]>) -> Vec<AuthorizedKey> {
     // Use a Set to deduplicate keys
     let mut unique_keys = std::collections::HashSet::new();
+    let mut result = Vec::new();
     
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -631,7 +945,9 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
             for line in content.lines() {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    unique_keys.insert(trimmed.to_string());
+                    if unique_keys.insert(trimmed.to_string()) {
+                        result.push(AuthorizedKey { user: "host".to_string(), key: trimmed.to_string() });
+                    }
                 }
             }
             tracing::info!("Added local key from {}", path);
@@ -658,7 +974,9 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
                         for line in text.lines() {
                             let trimmed = line.trim();
                             if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                                unique_keys.insert(trimmed.to_string());
+                                if unique_keys.insert(trimmed.to_string()) {
+                                    result.push(AuthorizedKey { user: user.to_string(), key: trimmed.to_string() });
+                                }
                             }
                         }
                         tracing::info!("Fetched keys for GitHub user {}", user);
@@ -673,7 +991,5 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
         }
     }
 
-    // Join all unique keys with newlines
-    let result = unique_keys.into_iter().collect::<Vec<_>>().join("\n");
     result
 }

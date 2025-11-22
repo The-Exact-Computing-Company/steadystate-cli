@@ -74,6 +74,7 @@
           pkgs.clippy
           pkgs.openssl.dev
           pkgs.pkg-config
+          pkgs.pijul
           backend
           cli
           treemerge.packages.${system}.default
