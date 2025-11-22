@@ -1,54 +1,57 @@
 name: CI Login Test
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_run:
+    workflows: ["Build and Cache"]
+    types: [completed]
 
 jobs:
   test-fake-auth:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v5
-      
+
       - uses: cachix/install-nix-action@v31
 
-      - uses: cachix/cachix-action@v14
+      - uses: cachix/cachix-action@v15
         with:
           name: rstats-on-nix
-      
+          authToken: ${{ secrets.CACHIX_AUTH }}
+
+      # We do not build from scratch unless necessary — Cachix will provide cached store paths.
       - name: Build workspace with predictable outputs
         run: |
           nix build .#cli -o result-cli
           nix build .#backend -o result-backend
-      
+
       - name: Start backend with fake auth
         run: |
           export ENABLE_FAKE_AUTH=1
           export JWT_SECRET=test-secret
           export PORT=8080
           export NOENV_FLAKE_PATH=/tmp/dummy-flake
-          
+
           result-backend/bin/steadystate-backend &
-          BACKEND_PID=$!
-          sleep 2 # Give the server a moment to start
-          echo "BACKEND_PID=$BACKEND_PID" >> $GITHUB_ENV
-      
+          echo "BACKEND_PID=$!" >> $GITHUB_ENV
+          sleep 2
+
       - name: Test fake login
         run: |
           export STEADYSTATE_BACKEND=http://localhost:8080
+
           result-cli/bin/steadystate login --provider fake
-          
-          # Check human-readable output
+
+          # Human-readable output
           result-cli/bin/steadystate whoami | grep "Logged in as: ci-test-user"
 
-          # Check machine-readable output and verify login status
+          # JSON output
           result-cli/bin/steadystate whoami --json | jq -e '.logged_in == true'
           result-cli/bin/steadystate whoami --json | jq -e '.login == "ci-test-user"'
-      
+
       - name: Cleanup Backend
         if: always()
         run: |
           echo "Stopping backend process (PID: $BACKEND_PID)..."
-          kill $BACKEND_PID || true
+          kill "$BACKEND_PID" || true
