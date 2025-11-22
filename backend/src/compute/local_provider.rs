@@ -600,16 +600,6 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
     // Use a Set to deduplicate keys
     let mut unique_keys = std::collections::HashSet::new();
     
-    // Open debug log file
-    let mut debug_log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/steadystate_key_debug.log")
-        .unwrap_or_else(|_| std::fs::File::create("/tmp/steadystate_key_debug.log").unwrap());
-        
-    use std::io::Write;
-    let _ = writeln!(debug_log, "--- Starting fetch_authorized_keys (clean) ---");
-
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -617,7 +607,6 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
 
     // 1. Add local keys
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let _ = writeln!(debug_log, "HOME={}", home);
     tracing::info!("fetch_authorized_keys: HOME={}", home);
     
     let local_key_paths = vec![
@@ -626,7 +615,6 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
     ];
 
     for path in local_key_paths {
-        let _ = writeln!(debug_log, "Checking path: {}", path);
         tracing::info!("Checking for local key at: {}", path);
         if let Ok(content) = std::fs::read_to_string(&path) {
             for line in content.lines() {
@@ -635,10 +623,8 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
                     unique_keys.insert(trimmed.to_string());
                 }
             }
-            let _ = writeln!(debug_log, "Found key at {}", path);
             tracing::info!("Added local key from {}", path);
         } else {
-            let _ = writeln!(debug_log, "Failed to read {}", path);
             tracing::warn!("Could not read local key at {}", path);
         }
     }
@@ -664,16 +650,13 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
                                 unique_keys.insert(trimmed.to_string());
                             }
                         }
-                        let _ = writeln!(debug_log, "Fetched keys for GitHub user {}", user);
                         tracing::info!("Fetched keys for GitHub user {}", user);
                     }
                 } else {
-                    let _ = writeln!(debug_log, "Failed to fetch keys for {}: HTTP {}", user, resp.status());
                     tracing::warn!("Failed to fetch keys for {}: HTTP {}", user, resp.status());
                 }
             }
             Err(e) => {
-                let _ = writeln!(debug_log, "Failed to fetch keys for {}: {}", user, e);
                 tracing::warn!("Failed to fetch keys for {}: {}", user, e);
             }
         }
@@ -681,6 +664,5 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
 
     // Join all unique keys with newlines
     let result = unique_keys.into_iter().collect::<Vec<_>>().join("\n");
-    let _ = writeln!(debug_log, "Total unique keys: {}", result.lines().count());
     result
 }
