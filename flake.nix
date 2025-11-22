@@ -6,7 +6,7 @@
     flake-utils.url = "github:numtide/flake-utils";
     treemerge.url = "github:b-rodrigues/treemerge";
     upterm-pkgs.url = "github:b-rodrigues/nixpkgs/update_upterm";
-    antigravity-pkgs.url = "github:xiaoxiangmoe/nixpkgs/antigravity";
+    antigravity-pkgs.url = "github:NixOS/nixpkgs/master";
   };
 
   outputs = { self, nixpkgs, flake-utils, treemerge, antigravity-pkgs, upterm-pkgs }:

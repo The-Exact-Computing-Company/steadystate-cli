@@ -2,16 +2,16 @@
   "nodes": {
     "antigravity-pkgs": {
       "locked": {
-        "lastModified": 1763535436,
-        "narHash": "sha256-w8OpLVew+iTNq4rKqlxAvGG1HRsuAgHjd/C/7MlyA0w=",
-        "owner": "xiaoxiangmoe",
+        "lastModified": 1763810475,
+        "narHash": "sha256-XEH/9+QAzCq1wWv5OTXRyu5VFHW7L6vkr4cdhYtFLcM=",
+        "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "33d2dab41afb2bcc93c4b592418ad3d7e8f5efed",
+        "rev": "153d92a285560c7ef715c9c754e6ffa215ff3d80",
         "type": "github"
       },
       "original": {
-        "owner": "xiaoxiangmoe",
-        "ref": "antigravity",
+        "owner": "NixOS",
+        "ref": "master",
         "repo": "nixpkgs",
         "type": "github"
       }
