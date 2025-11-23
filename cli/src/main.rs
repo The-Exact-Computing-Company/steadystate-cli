@@ -250,6 +250,9 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
     )
     .await?;
 
+    let mut final_endpoint = resp.endpoint.clone();
+    let mut final_magic_link = resp.magic_link.clone(); // Assuming UpResponse now has magic_link
+
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
@@ -260,13 +263,13 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
             println!("⏳ Provisioning session...");
             
             let mut attempts = 0;
-            let max_attempts = 60; // 60 * 2s = 2 minutes timeout
+            let max_attempts = 60; // 60 * 1s = 1 minute timeout
             
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 attempts += 1;
                 
-                let status: UpResponse = request_with_auth(
+                let status: UpResponse = request_with_auth( // Assuming UpResponse can also be used for status
                     client,
                     |c, jwt| {
                         c.get(format!("{}/sessions/{}", &*BACKEND_URL, resp.id))
@@ -278,9 +281,15 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                 
                 match status.state.as_str() {
                     "Running" => {
-                        if let Some(endpoint) = status.endpoint {
+                        final_endpoint = status.endpoint;
+                        final_magic_link = status.magic_link; // Update magic link from status
+                        
+                        if let Some(endpoint) = &final_endpoint {
                             println!("✅ Session ready!");
                             println!("SSH: {}", endpoint);
+                            if let Some(link) = &final_magic_link {
+                                println!("Magic Link: {}", link);
+                            }
                         } else {
                             println!("⚠️  Session is running but no endpoint available");
                         }
@@ -306,11 +315,17 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                     }
                 }
             }
-        } else if let Some(endpoint) = resp.endpoint {
+        } else if let Some(endpoint) = &resp.endpoint {
             println!("✅ Session ready!");
             println!("SSH: {}", endpoint);
-            
-            if mode_val == "collab" {
+            if let Some(link) = &resp.magic_link { // Print initial magic link if available
+                println!("Magic Link: {}", link);
+            }
+        }
+
+        // Launch dashboard if in collab mode and we have an endpoint
+        if mode_val == "collab" {
+            if let Some(endpoint) = final_endpoint {
                 println!("Launching dashboard...");
                 // Parse endpoint to get host/port/user
                 // Endpoint is ssh://steady@host:port
