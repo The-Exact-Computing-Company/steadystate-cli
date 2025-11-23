@@ -286,7 +286,19 @@ email = "system@steadystate.local"
             canonical_path.display()
         );
         
-        let _ = self.executor.run_status("sh", &["-c", &add_cmd]).await;
+        let add_output = Command::new("sh")
+            .arg("-c")
+            .arg(&add_cmd)
+            .output()
+            .await
+            .context("Failed to add files to canonical repo")?;
+
+        if !add_output.status.success() {
+            let stderr = String::from_utf8_lossy(&add_output.stderr);
+            let stdout = String::from_utf8_lossy(&add_output.stdout);
+            tracing::error!("pijul add failed. stdout: {}, stderr: {}", stdout, stderr);
+            return Err(anyhow!("pijul add failed: {}", stderr));
+        }
         
         // Record initial state - use --author flag to bypass identity requirement
         let record_cmd = format!(
@@ -310,8 +322,8 @@ email = "system@steadystate.local"
         if !record_output.status.success() {
             let stderr = String::from_utf8_lossy(&record_output.stderr);
             let stdout = String::from_utf8_lossy(&record_output.stdout);
-            tracing::warn!("Failed to record initial state. stdout: {}, stderr: {}", stdout, stderr);
-            // Don't fail - the repo is initialized, just not recorded
+            tracing::error!("Failed to record initial state. stdout: {}, stderr: {}", stdout, stderr);
+            return Err(anyhow!("pijul record failed: {}", stderr));
         } else {
             tracing::info!("Successfully recorded initial state in canonical repo");
         }
@@ -1138,6 +1150,27 @@ impl LocalComputeProvider {
 
             tracing::info!("Found steadystate CLI at: {:?}", cli_exe);
             std::fs::copy(&cli_exe, &target_exe).context("Failed to copy steadystate binary")?;
+            // Copy pijul binary
+            let mut pijul_exe = current_dir.join("pijul");
+            if !pijul_exe.exists() {
+                if let Ok(output) = std::process::Command::new("which").arg("pijul").output() {
+                    if output.status.success() {
+                        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        let path = PathBuf::from(path_str);
+                        if path.exists() {
+                            pijul_exe = path;
+                        }
+                    }
+                }
+            }
+            if pijul_exe.exists() {
+                let target_pijul = bin_dir.join("pijul");
+                std::fs::copy(&pijul_exe, &target_pijul).context("Failed to copy pijul binary")?;
+                tracing::info!("pijul binary copied successfully.");
+            } else {
+                tracing::warn!("pijul binary not found. Session might not work correctly.");
+            }
+
             Ok(())
         }).await??;
         
@@ -1199,10 +1232,18 @@ if [ ! -d "$WORKTREE" ]; then
     mkdir -p "$REPO_ROOT/worktrees"
     
     # Clone from canonical repo
-    pijul clone "$REPO_ROOT/canonical-pijul" "$WORKTREE" 2>&1 || {{
-        echo "Failed to clone workspace"
+    echo "Cloning workspace..." >> "$REPO_ROOT/clone.log"
+    pijul clone "$REPO_ROOT/canonical-pijul" "$WORKTREE" >> "$REPO_ROOT/clone.log" 2>&1 || {{
+        echo "Failed to clone workspace" >> "$REPO_ROOT/clone.log"
+        cat "$REPO_ROOT/clone.log"
         exit 1
     }}
+    echo "Clone finished. Checking contents:" >> "$REPO_ROOT/clone.log"
+    ls -la "$WORKTREE" >> "$REPO_ROOT/clone.log" 2>&1
+    echo "Checking pijul log:" >> "$REPO_ROOT/clone.log"
+    cd "$WORKTREE" && pijul log >> "$REPO_ROOT/clone.log" 2>&1 || echo "pijul log failed" >> "$REPO_ROOT/clone.log"
+    echo "Checking pijul list:" >> "$REPO_ROOT/clone.log"
+    cd "$WORKTREE" && pijul list >> "$REPO_ROOT/clone.log" 2>&1 || echo "pijul list failed" >> "$REPO_ROOT/clone.log"
 fi
 
 # Set HOME to workspace for isolation
@@ -1223,7 +1264,7 @@ if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
     exec bash -c "$SSH_ORIGINAL_COMMAND"
 else
     # Default to shell
-    cat << 'WELCOME'
+    cat << WELCOME
 ╔════════════════════════════════════════════════════════════╗
 ║         Welcome to SteadyState Collaboration Mode          ║
 ╚════════════════════════════════════════════════════════════╝
@@ -1443,6 +1484,10 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     tracing::info!("fetch_authorized_keys: HOME={}", home);
     
+    let host_user_id = github_user.map(|s| s.to_string())
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "host".to_string());
+    
     let local_key_paths = vec![
         format!("{}/.ssh/id_ed25519.pub", home),
         format!("{}/.ssh/id_rsa.pub", home),
@@ -1455,7 +1500,7 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
                 let trimmed = line.trim();
                 if !trimmed.is_empty() && !trimmed.starts_with('#') {
                     if unique_keys.insert(trimmed.to_string()) {
-                        result.push(AuthorizedKey { user: "host".to_string(), key: trimmed.to_string() });
+                        result.push(AuthorizedKey { user: host_user_id.clone(), key: trimmed.to_string() });
                     }
                 }
             }
