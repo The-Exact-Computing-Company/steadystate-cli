@@ -59,13 +59,15 @@ pub fn watch() -> Result<()> {
         // Let's clear screen and redraw header
         print!("\x1B[2J\x1B[1;1H");
         
-        println!("┌─────────────────────────────────────────────────────────────┐");
-        println!("│ SteadyState Session: {:<38} │", session_id);
+        // Try to get repo name from env first (set by wrapper.sh)
+        let display_repo_name = std::env::var("REPO_NAME").unwrap_or(repo_name.clone());
+
+        println!("SteadyState Session: {}", session_id);
         if let Ok(link) = std::env::var("MAGIC_LINK") {
-             println!("│ Magic Link: {:<47} │", link);
+             println!("Magic Link: {}", link);
         }
-        println!("│ Repo: {:<53} │", repo_name);
-        println!("└─────────────────────────────────────────────────────────────┘");
+        println!("Repo: {}", display_repo_name);
+        println!("-------------------------------------------------------------------------------------------------");
         println!();
         println!("Connected users:");
         if connected_users.is_empty() {

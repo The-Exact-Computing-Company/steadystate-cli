@@ -911,12 +911,22 @@ impl ComputeProvider for LocalComputeProvider {
             // Start event daemon
             let event_daemon_pid = self.start_event_daemon(&workspace_root).await?;
             
+            // Extract repo name from URL
+            let repo_name = request.repo_url.split('/').last().unwrap_or("unknown");
+            let owner = request.repo_url.split('/').nth_back(1).unwrap_or("unknown");
+            let full_repo_name = if owner != "unknown" && repo_name != "unknown" {
+                format!("{}/{}", owner, repo_name)
+            } else {
+                "unknown".to_string()
+            };
+
             // 5. Launch SSHD for collaboration
             let (pid, invite) = self.launch_sshd_for_collab(
                 &workspace_root,
                 github_login.as_deref(),
                 request.allowed_users.as_deref(),
-                &session.id
+                &session.id,
+                &full_repo_name
             ).await?;
             
             // Store session info
@@ -1052,6 +1062,7 @@ impl LocalComputeProvider {
         github_user: Option<&str>,
         allowed_users: Option<&[String]>,
         session_id: &str,
+        repo_name: &str,
     ) -> Result<(u32, String)> {
         use tokio::process::Command;
         use tokio::time::timeout;
@@ -1167,6 +1178,7 @@ export NOENV_FLAKE_PATH="{noenv_flake_path}"
 export JWT_SECRET="{jwt_secret}"
 export SESSION_ID="{session_id}"
 export MAGIC_LINK="{magic_link}"
+export REPO_NAME="{repo_name}"
 
 # Add user to active-users
 echo "$USER_ID" >> "$ACTIVE_USERS_FILE"
@@ -1232,7 +1244,8 @@ fi
         noenv_flake_path = self.flake_path.display(),
         jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "placeholder_secret".to_string()),
         session_id = session_id,
-        magic_link = magic_link
+        magic_link = magic_link,
+        repo_name = repo_name
         );
 
         std::fs::write(&wrapper_path, wrapper_content).context("Failed to write wrapper script")?;
