@@ -129,6 +129,7 @@ pub struct Session {
     pub _created_at: std::time::SystemTime,
     pub updated_at: std::time::SystemTime,
     pub error_message: Option<String>,
+    pub magic_link: Option<String>,
 }
 
 /// The request from the CLI to create a new session.
@@ -144,6 +145,18 @@ pub struct SessionRequest {
     pub mode: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MagicLink {
+    pub mode: String,
+    pub session_id: String,
+    pub username: String,
+    pub hostname: String,
+    pub port: Option<u16>,
+    pub token: Option<String>,
+    pub fingerprint: Option<String>,
+    pub upterm_url: Option<String>,
+}
+
 /// The information about a session that is sent back to the CLI.
 #[derive(Debug, Serialize)]
 pub struct SessionInfo {
@@ -152,6 +165,7 @@ pub struct SessionInfo {
     pub endpoint: Option<String>,
     pub compute_provider: String,
     pub message: Option<String>,
+    pub magic_link: Option<String>,
 }
 
 impl From<&Session> for SessionInfo {
@@ -162,6 +176,7 @@ impl From<&Session> for SessionInfo {
             endpoint: session.endpoint.clone(),
             compute_provider: session.compute_provider.clone(),
             message: session.error_message.clone(),
+            magic_link: session.magic_link.clone(),
         }
     }
 } 

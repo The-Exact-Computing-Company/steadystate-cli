@@ -98,6 +98,12 @@ impl CommandExecutor for MockCommandExecutor {
 
 #[tokio::test]
 async fn test_start_session_success() {
+    // Set temp session root for test environment
+    let temp_root = std::env::temp_dir().join("steady-test-sessions");
+    unsafe {
+        std::env::set_var("STEADYSTATE_SESSION_ROOT", &temp_root);
+    }
+
     let executor = Box::new(MockCommandExecutor::new());
     // Mock upterm output
     executor.add_response("upterm", 0, "Invite: ssh://user@host:22\n");
@@ -119,6 +125,7 @@ async fn test_start_session_success() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {
@@ -147,10 +154,22 @@ async fn test_start_session_success() {
     assert!(calls.iter().any(|c| c.args.iter().any(|a| a.contains("command -v nix"))));
     assert!(calls.iter().any(|c| c.cmd == "git" && c.args[0] == "clone"));
     assert!(calls.iter().any(|c| c.args.iter().any(|a| a.contains("--authorized-keys"))));
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(temp_root);
+    unsafe {
+        std::env::remove_var("STEADYSTATE_SESSION_ROOT");
+    }
 }
 
 #[tokio::test]
 async fn test_terminate_session() {
+    // Set temp session root for test environment
+    let temp_root = std::env::temp_dir().join("steady-test-kill");
+    unsafe {
+        std::env::set_var("STEADYSTATE_SESSION_ROOT", &temp_root);
+    }
+
     let executor = Box::new(MockCommandExecutor::new());
     let provider = LocalComputeProvider::new_with_executor(
         PathBuf::from("/tmp/flake"),
@@ -175,6 +194,7 @@ async fn test_terminate_session() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
     let request = SessionRequest { 
         repo_url: "repo".into(),
@@ -193,6 +213,12 @@ async fn test_terminate_session() {
 
     let calls = executor.get_calls();
     assert!(calls.iter().any(|c| c.args.iter().any(|a| a.contains("kill -TERM"))));
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(temp_root);
+    unsafe {
+        std::env::remove_var("STEADYSTATE_SESSION_ROOT");
+    }
 }
 
 #[tokio::test]
@@ -257,6 +283,7 @@ async fn test_start_session_git_failure() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {
@@ -298,6 +325,7 @@ async fn test_start_session_upterm_failure() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {
@@ -340,6 +368,7 @@ async fn test_start_session_nix_failure() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {

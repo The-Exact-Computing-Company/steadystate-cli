@@ -81,6 +81,7 @@ async fn create_session(
         _created_at: now,
         updated_at: now,
         error_message: None,
+        magic_link: None,
     };
 
     let session_info = SessionInfo::from(&session);

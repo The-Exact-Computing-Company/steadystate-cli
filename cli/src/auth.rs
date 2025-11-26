@@ -39,6 +39,7 @@ pub struct UpResponse {
     pub id: String,
     pub state: String,
     pub endpoint: Option<String>,
+    pub magic_link: Option<String>,
     pub message: Option<String>,
 }
 
@@ -314,11 +315,22 @@ pub fn extract_exp_from_jwt(jwt: &str) -> Option<u64> {
     }
 }
 
-/// Stores refresh token in the OS keychain.
+/// Helper to check for mock keyring environment variable
+fn get_mock_keyring_path(username: &str) -> Option<PathBuf> {
+    std::env::var("STEADYSTATE_KEYRING_DIR").ok().map(|d| PathBuf::from(d).join(format!("{}.keyring", username)))
+}
+
+/// Stores refresh token in the OS keychain (or mock file if configured).
 pub async fn store_refresh_token(username: &str, token: &str) -> Result<()> {
     if token.is_empty() {
         return Err(anyhow!("refresh token cannot be empty"));
     }
+    
+    // Check for mock keyring first
+    if let Some(path) = get_mock_keyring_path(username) {
+        return std::fs::write(path, token).context("failed to write mock keyring");
+    }
+
     let username = username.to_string();
     let token = token.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -331,8 +343,17 @@ pub async fn store_refresh_token(username: &str, token: &str) -> Result<()> {
     .await?
 }
 
-/// Retrieves refresh token from keychain if present.
+/// Retrieves refresh token from keychain (or mock file) if present.
 pub async fn get_refresh_token(username: &str) -> Result<Option<String>> {
+    // Check for mock keyring first
+    if let Some(path) = get_mock_keyring_path(username) {
+        if path.exists() {
+            return std::fs::read_to_string(path).map(Some).context("failed to read mock keyring");
+        } else {
+            return Ok(None);
+        }
+    }
+
     let username = username.to_string();
     tokio::task::spawn_blocking(move || -> Result<Option<String>> {
         let entry = Entry::new(SERVICE_NAME, &username).context("keyring entry creation failed")?;
@@ -348,8 +369,16 @@ pub async fn get_refresh_token(username: &str) -> Result<Option<String>> {
     .await?
 }
 
-/// Deletes refresh token from keychain if present.
+/// Deletes refresh token from keychain (or mock file) if present.
 pub async fn delete_refresh_token(username: &str) -> Result<()> {
+    // Check for mock keyring first
+    if let Some(path) = get_mock_keyring_path(username) {
+        if path.exists() {
+            std::fs::remove_file(path).context("failed to delete mock keyring")?;
+        }
+        return Ok(());
+    }
+
     let username = username.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
         if let Ok(entry) = Entry::new(SERVICE_NAME, &username) {

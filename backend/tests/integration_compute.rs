@@ -40,6 +40,7 @@ async fn test_integration_nix_check() {
         _created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
+        magic_link: None,
     };
 
     let request = SessionRequest {

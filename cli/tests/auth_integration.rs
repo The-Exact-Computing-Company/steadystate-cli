@@ -88,6 +88,8 @@ mod helpers {
             let mut cmd = Command::new(env!("CARGO_BIN_EXE_steadystate"));
             cmd.env("STEADYSTATE_CONFIG_DIR", self.tempdir.path());
             cmd.env("STEADYSTATE_BACKEND", &self.server_url);
+            // Set mock keyring dir
+            cmd.env("STEADYSTATE_KEYRING_DIR", self.tempdir.path());
             cmd.args(args);
             cmd.output().expect("run steadystate cli")
         }
@@ -115,7 +117,14 @@ mod helpers {
         }
 
         pub fn set_keyring_password(&self, username: &str, password: &str) {
-            keyring::Entry::new("steadystate", username).unwrap().set_password(password).unwrap();
+            // Use mock keyring file
+            let path = self.tempdir.path().join(format!("{}.keyring", username));
+            fs::write(path, password).unwrap();
+        }
+        
+        pub fn get_keyring_password(&self, username: &str) -> std::io::Result<String> {
+            let path = self.tempdir.path().join(format!("{}.keyring", username));
+            fs::read_to_string(path)
         }
     }
 
@@ -217,6 +226,6 @@ fn logout_removes_session_and_revokes_refresh() {
     assert!(reqs[0].starts_with("POST /auth/revoke"));
     let json_path = harness.tempdir.path().join("steadystate/session.json");
     assert!(!json_path.exists());
-    let res = keyring::Entry::new("steadystate", "tester").unwrap().get_password();
-    assert!(res.is_err());
+    let res = harness.get_keyring_password("tester");
+    assert!(res.is_err()); // Should be deleted
 }
