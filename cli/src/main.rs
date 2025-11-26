@@ -10,6 +10,7 @@ mod config;
 mod session;
 mod sync;
 mod notify;
+mod merge;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};

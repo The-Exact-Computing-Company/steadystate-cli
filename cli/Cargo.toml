@@ -48,5 +48,11 @@ url = "2.5"
 ratatui = "0.29.0"
 crossterm = "0.29.0"
 
+# CRDT Merge Engine
+yrs = "0.18"
+similar = "2.4"
+walkdir = "2"
+
+
 [dev-dependencies]
 tempfile = "3.10"

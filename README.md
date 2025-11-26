@@ -103,6 +103,14 @@ common lock files.
 
 SSH is the backbone. Bring your own editor, or use `ne`.
 
+### Conflict-Free Sync Model
+
+SteadyState uses a robust synchronization model designed to prevent conflicts during collaborative sessions:
+
+*   **Session Branch Isolation**: Each session operates on a dedicated Git branch (`steadystate/collab/<session_id>`), isolating session work from the upstream `main` branch.
+*   **Y-CRDT Merge Engine**: `steadystate sync` uses a Yjs/Yrs-based CRDT merge engine to perform conflict-free 3-way merges (Base, Local, Canonical) for text files. This ensures that concurrent edits from multiple users are merged deterministically without manual conflict resolution.
+*   **Git Integration**: The merged result is committed to the session branch. Users can merge the session branch back to `main` via standard Pull Requests after the session.
+
 ---
 
 ## Components

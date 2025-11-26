@@ -73,7 +73,7 @@ impl EventDaemon {
                 if let notify::event::EventKind::Create(_) = event.kind {
                     for path in event.paths {
                         if path.is_dir() {
-                            // Check if it looks like a user workspace (has .pijul?)
+                            // Check if it looks like a user workspace (has .git?)
                             // Or just assume any new dir is a user workspace?
                             // Let's just signal a "NewWorkspace" event and handle it in the loop?
                             // For simplicity, we might just poll or restart.
@@ -107,12 +107,12 @@ impl EventDaemon {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             
             // Skip system dirs
-            if name.starts_with('.') || name == "git-repo" || name == "canonical-pijul" || name == "bin" {
+            if name.starts_with('.') || name == "git-repo" || name == "canonical" || name == "bin" {
                 continue;
             }
             
-            // Check if it has .pijul (valid workspace)
-            if path.join(".pijul").exists() {
+            // Check if it has .git (valid workspace)
+            if path.join(".git").exists() {
                 workspaces.push((name, path));
             }
         }
@@ -210,7 +210,6 @@ impl EventDaemon {
 fn should_track(path: &Path) -> bool {
     // Basic filtering
     let s = path.to_string_lossy();
-    !s.contains("/.pijul/") && 
     !s.contains("/.git/") && 
     !s.contains("/target/") && 
     !s.contains("/node_modules/") &&

@@ -167,165 +167,44 @@ impl LocalComputeProvider {
         Ok(())
     }
 
-    async fn ensure_pijul_installed(&self) -> Result<()> {
-        // 1. Check if pijul is already in PATH
-        let status = self.executor.run_status("sh", &["-c", "command -v pijul >/dev/null 2>&1"]).await
-            .context("Failed to check for pijul")?;
 
-        if status.success() {
-            return Ok(());
-        }
 
-        tracing::info!("Pijul not found; installing...");
+    async fn init_canonical_git_repo(&self, session_root: &Path, git_repo: &Path, session_id: &str) -> Result<PathBuf> {
+        let canonical_path = session_root.join("canonical");
+        tracing::info!("Initializing canonical Git repository at {}", canonical_path.display());
         
-        // 2. Install Pijul (using cargo for now, or a pre-built binary if available)
-        // For reliability in this environment, let's assume cargo is available or try a static binary.
-        // Since we are in a dev environment, let's try cargo install if cargo exists, else fail.
+        // Create bare clone from git_repo
+        let git_repo_str = git_repo.to_str().ok_or_else(|| anyhow!("Invalid path encoding"))?;
+        let canonical_str = canonical_path.to_str().ok_or_else(|| anyhow!("Invalid path encoding"))?;
         
-        let cargo_check = self.executor.run_status("sh", &["-c", "command -v cargo >/dev/null 2>&1"]).await?;
-        if cargo_check.success() {
-             let status = self.executor.run_status("cargo", &["install", "pijul"]).await
-                .context("Failed to install pijul via cargo")?;
-             if !status.success() {
-                 return Err(anyhow!("Failed to install pijul via cargo"));
-             }
-             Ok(())
-        } else {
-            // Fallback: try to download a static binary or fail
-            // For now, fail with a helpful message
-            Err(anyhow!("Pijul not found and cargo not available to install it. Please install pijul."))
-        }
-    }
-
-    async fn init_canonical_repo(&self, session_root: &Path, git_repo: &Path) -> Result<PathBuf> {
-        let canonical_path = session_root.join("canonical-pijul");
-        tracing::info!("Initializing canonical Pijul repository at {}", canonical_path.display());
-        
-        // Create canonical directory
-        std::fs::create_dir_all(&canonical_path)
-            .context("Failed to create canonical-pijul directory")?;
-            
-        // Copy files from git-repo (excluding .git)
-        let status = std::process::Command::new("rsync")
-            .args(&[
-                "-a",
-                "--exclude=.git",
-                &format!("{}/", git_repo.display()),
-                &format!("{}/", canonical_path.display()),
-            ])
-            .status()
-            .context("Failed to run rsync")?;
+        // 1. Clone bare
+        let status = self.executor.run_status("git", &["clone", "--bare", git_repo_str, canonical_str]).await
+            .context("Failed to create canonical git repo")?;
             
         if !status.success() {
-            return Err(anyhow!("rsync failed to copy files to canonical repo"));
+            return Err(anyhow!("git clone --bare failed"));
+        }
+
+        // 2. Create session branch
+        let branch_name = format!("steadystate/collab/{}", session_id);
+        // We need to run git inside the bare repo
+        // git -C canonical branch <branch> HEAD
+        let status = self.executor.run_status("git", &["-C", canonical_str, "branch", &branch_name, "HEAD"]).await
+            .context("Failed to create session branch")?;
+
+        if !status.success() {
+             return Err(anyhow!("Failed to create session branch {}", branch_name));
         }
         
-        // Setup isolated Pijul home directory
-        let pijul_home = session_root.join("system-pijul-home");
-        std::fs::create_dir_all(&pijul_home).context("Failed to create system pijul home")?;
-        
-        // Create Pijul config directories
-        let config_dir = pijul_home.join(".config/pijul");
-        std::fs::create_dir_all(&config_dir).context("Failed to create pijul config dir")?;
-        
-        // Create a minimal Pijul config file
-        let config_content = r#"[author]
-name = "System"
-email = "system@steadystate.local"
-"#;
-        std::fs::write(config_dir.join("config.toml"), config_content)
-            .context("Failed to write pijul config")?;
-        
-        // Generate SSH key for Pijul identity (Pijul uses SSH keys internally)
-        let keys_dir = config_dir.join("keys");
-        std::fs::create_dir_all(&keys_dir).context("Failed to create keys dir")?;
-        
-        let key_path = keys_dir.join("system");
-        // We use Command directly here as we want to await output/status simply
-        let keygen_status = Command::new("ssh-keygen")
-            .args(&[
-                "-t", "ed25519",
-                "-f", key_path.to_str().unwrap(),
-                "-N", "",
-                "-C", "system@steadystate.local",
-            ])
-            .output()
-            .await
-            .context("Failed to generate SSH key for Pijul")?;
-        
-        if !keygen_status.status.success() {
-            tracing::warn!("ssh-keygen failed, Pijul may require manual identity setup");
-        }
-        
-        // Initialize Pijul repository with our isolated HOME
-        let init_cmd = format!(
-            "export HOME={} && \
-             export XDG_CONFIG_HOME={}/.config && \
-             cd {} && \
-             pijul init",
-            pijul_home.display(),
-            pijul_home.display(),
-            canonical_path.display()
-        );
-        
-        let status = self.executor.run_status("sh", &["-c", &init_cmd]).await
-            .context("Failed to run pijul init in canonical repo")?;
+        // 3. Update HEAD to point to session branch?
+        // For a bare repo, HEAD determines what is checked out by default when cloning.
+        // git -C canonical symbolic-ref HEAD refs/heads/<branch>
+        let ref_name = format!("refs/heads/{}", branch_name);
+        let status = self.executor.run_status("git", &["-C", canonical_str, "symbolic-ref", "HEAD", &ref_name]).await
+            .context("Failed to update HEAD to session branch")?;
             
         if !status.success() {
-            return Err(anyhow!("pijul init failed in canonical repo"));
-        }
-        
-        // Add all files
-        let add_cmd = format!(
-            "export HOME={} && \
-             export XDG_CONFIG_HOME={}/.config && \
-             cd {} && \
-             pijul add -r .",
-            pijul_home.display(),
-            pijul_home.display(),
-            canonical_path.display()
-        );
-        
-        let add_output = Command::new("sh")
-            .arg("-c")
-            .arg(&add_cmd)
-            .output()
-            .await
-            .context("Failed to add files to canonical repo")?;
-
-        if !add_output.status.success() {
-            let stderr = String::from_utf8_lossy(&add_output.stderr);
-            let stdout = String::from_utf8_lossy(&add_output.stdout);
-            tracing::error!("pijul add failed. stdout: {}, stderr: {}", stdout, stderr);
-            return Err(anyhow!("pijul add failed: {}", stderr));
-        }
-        
-        // Record initial state - use --author flag to bypass identity requirement
-        let record_cmd = format!(
-            "export HOME={} && \
-             export XDG_CONFIG_HOME={}/.config && \
-             cd {} && \
-             pijul record -a -m 'Initial import from Git' --author 'System <system@steadystate.local>'",
-            pijul_home.display(),
-            pijul_home.display(),
-            canonical_path.display()
-        );
-        
-        // Use Command to capture output for debugging
-        let record_output = Command::new("sh")
-            .arg("-c")
-            .arg(&record_cmd)
-            .output()
-            .await
-            .context("Failed to record initial state")?;
-            
-        if !record_output.status.success() {
-            let stderr = String::from_utf8_lossy(&record_output.stderr);
-            let stdout = String::from_utf8_lossy(&record_output.stdout);
-            tracing::error!("Failed to record initial state. stdout: {}, stderr: {}", stdout, stderr);
-            return Err(anyhow!("pijul record failed: {}", stderr));
-        } else {
-            tracing::info!("Successfully recorded initial state in canonical repo");
+             return Err(anyhow!("Failed to update HEAD to session branch"));
         }
         
         Ok(canonical_path)
@@ -353,7 +232,7 @@ if [ -z "$SESSION_ROOT" ]; then
     SESSION_ROOT=$(dirname "$WORKSPACE")
 fi
 
-CANONICAL="${CANONICAL_REPO:-$SESSION_ROOT/canonical-pijul}"
+CANONICAL="${CANONICAL_REPO:-$SESSION_ROOT/canonical}"
 ACTIVITY_LOG="${ACTIVITY_LOG:-$SESSION_ROOT/activity-log}"
 
 log_activity() {
@@ -368,64 +247,38 @@ log_activity "syncing"
 
 cd "$WORKSPACE"
 
-# 1. Record local changes (if any)
-if pijul add . >/dev/null 2>&1; then
-    if pijul record -a -m "Changes by $USER_ID" --author "$USER_ID <$USER_ID@steadystate.local>" 2>&1 | grep -v "Nothing to record"; then
-        echo "✓ Recorded your changes"
-        log_activity "recorded"
-    fi
+# 1. Check for changes
+if [ -n "$(git status --porcelain)" ]; then
+    # Record local changes
+    git add -A
+    git commit -m "Auto-sync by $USER_ID" --author "$USER_ID <$USER_ID@steadystate.local>"
+    echo "✓ Recorded your changes"
+    log_activity "recorded"
 fi
 
-# 2. Pull from canonical
+# 2. Pull from canonical (rebase)
 echo "Pulling changes from collaborators..."
-if ! pijul pull canonical --all >/dev/null 2>&1; then
-    echo "Warning: Pull may have conflicts, checking..."
+if ! git pull --rebase canonical HEAD >/dev/null 2>&1; then
+    echo "Warning: Pull failed (conflict?), checking..."
 fi
 
 # 3. Check for conflicts
-CONFLICTS=$(find . -type f ! -path './.pijul/*' -exec grep -l '<<<<<<<' {} \; 2>/dev/null || true)
-
-if [ -n "$CONFLICTS" ]; then
-    echo ""
+if [ -f .git/rebase-merge/git-rebase-todo ] || [ -d .git/rebase-apply ]; then
+     echo ""
     echo "⚠️  MERGE CONFLICTS DETECTED"
     echo ""
-    echo "The following files have conflicts that need your attention:"
-    echo ""
-    
-    for file in $CONFLICTS; do
-        # Find first conflict line
-        line=$(grep -n '<<<<<<<' "$file" | head -1 | cut -d: -f1)
-        echo "  📝 $file (line $line)"
-        
-        # Log conflict
-        log_activity "conflict:{\"file\":\"$file\",\"line\":$line}"
-    done
-    
-    echo ""
-    echo "Please:"
-    echo "  1. Open the conflicted files"
-    echo "  2. Look for conflict markers: <<<<<<<, =======, >>>>>>>"
-    echo "  3. Edit to resolve conflicts"
-    echo "  4. Save your changes"
-    echo "  5. Run 'steadystate sync' again"
-    echo ""
-    
-    exit 0
+    echo "Please resolve conflicts and run 'git rebase --continue'"
+    # TODO: Better conflict handling?
+    # For now, just exit
+    exit 1
 fi
 
-# 4. Auto-record merge if needed
-if [ -n "$(pijul diff 2>/dev/null)" ]; then
-    pijul add . >/dev/null 2>&1 || true
-    pijul record -a -m "Auto-merge by $USER_ID" --author "$USER_ID <$USER_ID@steadystate.local>" 2>&1 | grep -v "Nothing to record" || true
-    echo "✓ Merged changes from collaborators"
-fi
-
-# 5. Push to canonical
-if pijul push canonical >/dev/null 2>&1; then
+# 4. Push to canonical
+if git push canonical HEAD >/dev/null 2>&1; then
     echo "✓ Pushed to canonical repository"
 fi
 
-# 6. Log sync completion
+# 5. Log sync completion
 log_activity "synced"
 echo ""
 echo "✓ Sync complete!"
@@ -445,10 +298,10 @@ case "$1" in
         exec steadystate-sync
         ;;
     diff)
-        pijul diff
+        git diff
         ;;
     status)
-        pijul status
+        git status
         ;;
     finalize)
         # TODO: Implement finalize
@@ -874,9 +727,7 @@ impl ComputeProvider for LocalComputeProvider {
         }
         
         self.ensure_nix_installed().await?;
-        if request.mode.as_deref() == Some("collab") {
-            self.ensure_pijul_installed().await?;
-        }
+
         
         let (workspace_root, repo_path) = self.create_workspace(&session.id)?;
         
@@ -906,12 +757,12 @@ impl ComputeProvider for LocalComputeProvider {
              }
         }
 
-        // 4. Initialize Canonical Pijul Repo (if collab mode)
+        // 4. Initialize Canonical Git Repo (if collab mode)
         let is_collab = request.mode.as_deref().unwrap_or("pair") == "collab";
         
         if is_collab {
             // Initialize canonical repo
-            self.init_canonical_repo(&workspace_root, &repo_path).await?;
+            self.init_canonical_git_repo(&workspace_root, &repo_path, &session.id).await?;
             
             // Install scripts
             self.install_steadystate_commands(&workspace_root)?;
@@ -959,16 +810,8 @@ impl ComputeProvider for LocalComputeProvider {
         } else {
             // Legacy/Pair mode (Upterm)
             
-            // Re-implement minimal pijul init for pair mode (inline)
-            let init_cmd = format!("cd {} && pijul init", repo_path.display());
-            self.executor.run_status("sh", &["-c", &init_cmd]).await?;
-            let add_cmd = format!("cd {} && pijul add -r . 2>&1", repo_path.display());
-            self.executor.run_status("sh", &["-c", &add_cmd]).await?;
-            let record_cmd = format!(
-                "cd {} && pijul record -a -m 'Initial import' --author 'System <system@steadystate.local>' 2>&1",
-                repo_path.display()
-            );
-            self.executor.run_status("sh", &["-c", &record_cmd]).await?;
+
+
             
             // Launch Upterm
             // Launch Upterm
@@ -1150,26 +993,7 @@ impl LocalComputeProvider {
 
             tracing::info!("Found steadystate CLI at: {:?}", cli_exe);
             std::fs::copy(&cli_exe, &target_exe).context("Failed to copy steadystate binary")?;
-            // Copy pijul binary
-            let mut pijul_exe = current_dir.join("pijul");
-            if !pijul_exe.exists() {
-                if let Ok(output) = std::process::Command::new("which").arg("pijul").output() {
-                    if output.status.success() {
-                        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        let path = PathBuf::from(path_str);
-                        if path.exists() {
-                            pijul_exe = path;
-                        }
-                    }
-                }
-            }
-            if pijul_exe.exists() {
-                let target_pijul = bin_dir.join("pijul");
-                std::fs::copy(&pijul_exe, &target_pijul).context("Failed to copy pijul binary")?;
-                tracing::info!("pijul binary copied successfully.");
-            } else {
-                tracing::warn!("pijul binary not found. Session might not work correctly.");
-            }
+
 
             Ok(())
         }).await??;
@@ -1233,31 +1057,35 @@ if [ ! -d "$WORKTREE" ]; then
     
     # Clone from canonical repo
     echo "Cloning workspace..." >> "$REPO_ROOT/clone.log"
-    pijul clone "$REPO_ROOT/canonical-pijul" "$WORKTREE" >> "$REPO_ROOT/clone.log" 2>&1 || {{
+    # Use git clone with session branch
+    git clone --branch steadystate/collab/{session_id} "$REPO_ROOT/canonical" "$WORKTREE" >> "$REPO_ROOT/clone.log" 2>&1 || {{
         echo "Failed to clone workspace" >> "$REPO_ROOT/clone.log"
         cat "$REPO_ROOT/clone.log"
         exit 1
     }}
-    echo "Clone finished. Checking contents:" >> "$REPO_ROOT/clone.log"
-    ls -la "$WORKTREE" >> "$REPO_ROOT/clone.log" 2>&1
-    echo "Checking pijul log:" >> "$REPO_ROOT/clone.log"
-    cd "$WORKTREE" && pijul log >> "$REPO_ROOT/clone.log" 2>&1 || echo "pijul log failed" >> "$REPO_ROOT/clone.log"
-    echo "Checking pijul list:" >> "$REPO_ROOT/clone.log"
-    cd "$WORKTREE" && pijul list >> "$REPO_ROOT/clone.log" 2>&1 || echo "pijul list failed" >> "$REPO_ROOT/clone.log"
+    
+    # Configure remote 'canonical'
+    cd "$WORKTREE"
+    git remote rename origin canonical
+    
+    # Configure user identity
+    git config user.name "$USER_ID"
+    git config user.email "$USER_ID@steadystate.local"
+    
+    # Initialize metadata
+    mkdir -p "$WORKTREE/.worktree"
+    HEAD_COMMIT=$(git rev-parse HEAD)
+    echo "{{\"session_branch\": \"steadystate/collab/{session_id}\", \"last_synced_commit\": \"$HEAD_COMMIT\"}}" > "$WORKTREE/.worktree/steadystate.json"
+    
+    echo "Clone finished." >> "$REPO_ROOT/clone.log"
 fi
 
 # Set HOME to workspace for isolation
 export HOME="$WORKTREE"
 export USER_WORKSPACE="$WORKTREE"
-export CANONICAL_REPO="$REPO_ROOT/canonical-pijul"
+export CANONICAL_REPO="$REPO_ROOT/canonical"
 
 cd "$WORKTREE" || exit 1
-
-# Configure Pijul remote if not exists
-if ! pijul remote 2>/dev/null | grep -q "canonical"; then
-    echo "Adding canonical remote..."
-    pijul remote add canonical "$CANONICAL_REPO" 2>&1 || true
-fi
 
 # Handle SSH_ORIGINAL_COMMAND
 if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
