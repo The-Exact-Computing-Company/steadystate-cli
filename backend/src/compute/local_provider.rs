@@ -1155,7 +1155,7 @@ fi
         
         let sshd_config = format!(r#"# SteadyState SSH Configuration
 Port {port}
-ListenAddress 127.0.0.1
+ListenAddress 0.0.0.0
 HostKey {host_key}
 PidFile {pid}
 
@@ -1283,7 +1283,18 @@ Subsystem sftp internal-sftp
 
         // Use current user for invite link
         let current_user = std::env::var("USER").unwrap_or_else(|_| "steady".to_string());
-        let hostname = "localhost";
+        
+        // Try to detect hostname/IP
+        let hostname = if let Ok(output) = Command::new("hostname").arg("-I").output().await {
+             if output.status.success() {
+                 String::from_utf8_lossy(&output.stdout).split_whitespace().next().unwrap_or("localhost").to_string()
+             } else {
+                 "localhost".to_string()
+             }
+        } else {
+             "localhost".to_string()
+        };
+        
         let invite = format!("ssh://{}@{}:{}", current_user, hostname, port);
         
         tracing::info!("SSHD ready. Connect with: {}", invite);
