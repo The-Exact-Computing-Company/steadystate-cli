@@ -55,7 +55,7 @@ Defines the authentication-related API endpoints.
 Defines endpoints for managing development sessions.
 
 - **`router()`**: Creates and returns the Axum `Router` for all session-related routes (`/`, `/{id}`).
-- **`create_session()`**: The handler for `POST /sessions`. It creates a new session record, returns an `ACCEPTED` status, and spawns a background task to provision the session.
+- **`create_session()`**: The handler for `POST /sessions`. It creates a new session record, returns an `ACCEPTED` status (including a `magic_link` for easy connection), and spawns a background task to provision the session.
 - **`get_session_status()`**: The handler for `GET /sessions/{id}`. It returns the current status of a specific session.
 - **`terminate_session()`**: The handler for `DELETE /sessions/{id}`. It initiates the termination of a session and returns an `ACCEPTED` status.
 - **`run_provisioning()`**: A private background task that handles the logic for provisioning a new compute session using the appropriate `ComputeProvider`. It updates the session state based on the outcome (e.g., to `Running` or `Failed`).
@@ -88,7 +88,70 @@ An implementation of the `ComputeProvider` trait that runs development sessions 
 - **`capture_upterm_invite()`**: A private async helper that reads the stdout of the `upterm` process to find and return the SSH invite link.
 - **`kill_pid()`**: A private async function to terminate a process by its process ID (PID).
 
-## CLI Architecture
+## Collaboration Architecture
+ 
+ SteadyState introduces a "Shared Workspace" model (`--mode=collab`) to enable seamless asynchronous collaboration on the same compute instance.
+ 
+ ### Shared Workspace Structure
+ 
+ When a session is started in `collab` mode, the backend provisions a secure directory structure:
+ 
+ ```
+ ~/.steadystate/sessions/<session_id>/
+ ├── canonical/          # Bare Git repository (synchronization point)
+ ├── worktrees/          # Directory containing per-user worktrees
+ │   ├── user1/
+ │   └── user2/
+ ├── sshd/               # Dedicated SSH daemon configuration and keys
+ ├── bin/                # Session-specific binaries (steadystate-cli, sync scripts)
+ ├── activity-log        # Log of user actions (syncs, commits)
+ └── active-users        # List of currently connected users
+ ```
+ 
+ ### Session Initialization
+ 
+ 1.  **Canonical Repo**: The backend initializes a bare clone of the target repository in `canonical/`.
+ 2.  **Session Branch**: A dedicated branch `steadystate/collab/<session_id>` is created to isolate session work.
+ 3.  **SSHD Launch**: A custom `sshd` instance is launched on a random high port, configured to:
+     *   Use a generated host key.
+     *   Authenticate users via their GitHub public keys (fetched by the backend).
+     *   Force all connections to execute a `wrapper.sh` script.
+ 
+ ### Magic Links
+ 
+ The backend generates a **Magic Link** (`steadystate://<mode>/<session_id>?ssh=...`) for every session. This link encodes:
+ 
+ *   **Mode**: `pair` or `collab`.
+ *   **Session ID**: The unique identifier for the session.
+ *   **Connection Details**: The full SSH connection string (user, host, port) needed to join.
+ 
+ The CLI's `steadystate join <url>` command parses this link to automatically configure the SSH connection.
+ 
+ ### Connection & Isolation
+ 
+ When a user connects via SSH (`ssh steady@host -p <port>`):
+ 
+ 1.  **Authentication**: `sshd` authenticates the user using their public key.
+ 2.  **Wrapper Script**: The `wrapper.sh` script is executed:
+     *   Identifies the user based on the key used.
+     *   Creates a private **Git Worktree** for the user in `worktrees/<user>/` if it doesn't exist.
+     *   Configures Git identity (user.name, user.email) for that worktree.
+     *   Sets `HOME` and `USER_WORKSPACE` environment variables to the worktree path.
+     *   Drops the user into a shell (or executes the requested command) *inside* their worktree.
+ 
+ This ensures that while users share the same compute resources (CPU, RAM, Nix store), their file system changes are isolated until they choose to sync.
+ 
+ ### Synchronization Workflow
+ 
+ Users synchronize their work using the `steadystate sync` command (injected into the session path):
+ 
+ 1.  **Commit**: Local changes in the user's worktree are automatically committed.
+ 2.  **Pull (Rebase)**: The user's branch is rebased on top of the `canonical` repository's HEAD. This pulls in changes from other collaborators.
+ 3.  **Push**: The user's updated branch is pushed back to the `canonical` repository.
+ 
+ This "Commit-Rebase-Push" loop ensures a linear history and allows users to resolve conflicts locally if they arise during the rebase step.
+ 
+ ## CLI Architecture
 
 The `cli` is a command-line application built with `clap` that serves as the primary user interface for SteadyState. It communicates with the `backend` via a REST API.
 
