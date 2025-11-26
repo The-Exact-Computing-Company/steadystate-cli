@@ -1490,6 +1490,23 @@ struct GitHubCollaborator {
     login: String,
 }
 
+#[derive(serde::Deserialize)]
+struct GitHubRepo {
+    fork: bool,
+    parent: Option<Box<GitHubRepoParent>>,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubRepoParent {
+    owner: GitHubOwner,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubOwner {
+    login: String,
+}
+
 async fn fetch_github_collaborators(owner: &str, repo: &str, token: &str) -> Result<Vec<String>> {
     tracing::info!("Fetching collaborators for {}/{}", owner, repo);
     eprintln!("DEBUG: fetch_github_collaborators called for {}/{}", owner, repo);
@@ -1499,26 +1516,84 @@ async fn fetch_github_collaborators(owner: &str, repo: &str, token: &str) -> Res
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    let url = format!("https://api.github.com/repos/{}/{}/collaborators", owner, repo);
-    
-    let resp = client.get(&url)
+    // 1. Fetch Repository Details to check for fork
+    let repo_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+    let repo_resp = client.get(&repo_url)
         .header("Authorization", format!("Bearer {}", token))
         .header("Accept", "application/vnd.github+json")
         .send()
         .await?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        tracing::error!("Failed to fetch collaborators: HTTP {} - {}", status, text);
-        eprintln!("DEBUG: GitHub API Error: HTTP {} - {}", status, text);
-        return Err(anyhow::anyhow!("Failed to fetch collaborators: HTTP {}", status));
+    let mut upstream_owner_repo = None;
+
+    if repo_resp.status().is_success() {
+        if let Ok(repo_info) = repo_resp.json::<GitHubRepo>().await {
+            if repo_info.fork {
+                if let Some(parent) = repo_info.parent {
+                    upstream_owner_repo = Some((parent.owner.login, parent.name));
+                    eprintln!("DEBUG: Repository is a fork. Upstream: {}/{}", 
+                        upstream_owner_repo.as_ref().unwrap().0, 
+                        upstream_owner_repo.as_ref().unwrap().1
+                    );
+                }
+            }
+        }
+    } else {
+        eprintln!("DEBUG: Failed to fetch repo details: {}", repo_resp.status());
     }
 
-    let collaborators: Vec<GitHubCollaborator> = resp.json().await?;
-    let logins: Vec<String> = collaborators.into_iter().map(|c| c.login).collect();
+    // Helper to fetch collaborators for a specific repo
+    let fetch_for_repo = |o: &str, r: &str| {
+        let o = o.to_string();
+        let r = r.to_string();
+        let client = client.clone();
+        let token = token.to_string();
+        async move {
+            let url = format!("https://api.github.com/repos/{}/{}/collaborators?affiliation=all&per_page=100", o, r);
+            let resp = client.get(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await?;
+                
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                eprintln!("DEBUG: Failed to fetch collaborators for {}/{}: {} - {}", o, r, status, text);
+                return Err(anyhow::anyhow!("HTTP {}", status));
+            }
+            
+            let collaborators: Vec<GitHubCollaborator> = resp.json().await?;
+            let logins: Vec<String> = collaborators.into_iter().map(|c| c.login).collect();
+            Ok(logins)
+        }
+    };
+
+    let mut all_collaborators = std::collections::HashSet::new();
+
+    // 2. Fetch for current repo
+    match fetch_for_repo(owner, repo).await {
+        Ok(cols) => {
+            eprintln!("DEBUG: Fetched {} collaborators from {}/{}", cols.len(), owner, repo);
+            all_collaborators.extend(cols);
+        },
+        Err(e) => eprintln!("DEBUG: Error fetching current repo collaborators: {}", e),
+    }
+
+    // 3. Fetch for upstream if exists
+    if let Some((up_owner, up_repo)) = upstream_owner_repo {
+        match fetch_for_repo(&up_owner, &up_repo).await {
+            Ok(cols) => {
+                eprintln!("DEBUG: Fetched {} collaborators from upstream {}/{}", cols.len(), up_owner, up_repo);
+                all_collaborators.extend(cols);
+            },
+            Err(e) => eprintln!("DEBUG: Error fetching upstream collaborators: {}", e),
+        }
+    }
+
+    let result: Vec<String> = all_collaborators.into_iter().collect();
+    tracing::info!("Found {} unique collaborators total", result.len());
+    eprintln!("DEBUG: Found {} unique collaborators total: {:?}", result.len(), result);
     
-    tracing::info!("Found {} collaborators: {:?}", logins.len(), logins);
-    eprintln!("DEBUG: Found {} collaborators: {:?}", logins.len(), logins);
-    Ok(logins)
+    Ok(result)
 }
