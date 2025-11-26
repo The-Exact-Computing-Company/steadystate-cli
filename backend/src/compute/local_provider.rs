@@ -763,26 +763,41 @@ impl ComputeProvider for LocalComputeProvider {
     // Determine allowed users
     let mut allowed_users_list = request.allowed_users.clone();
     
+    eprintln!("DEBUG: Initial allowed_users: {:?}", allowed_users_list);
+    eprintln!("DEBUG: Has GitHub token: {}", github_token.is_some());
+
     // If no allowed users specified (and not explicitly "none"), default to all collaborators
     if allowed_users_list.is_none() {
         if let Some(token) = &github_token {
-            let repo_name = request.repo_url.split('/').last().unwrap_or("unknown");
+            let mut repo_name = request.repo_url.split('/').last().unwrap_or("unknown");
+            if repo_name.ends_with(".git") {
+                repo_name = &repo_name[..repo_name.len() - 4];
+            }
             let owner = request.repo_url.split('/').nth_back(1).unwrap_or("unknown");
             
+            eprintln!("DEBUG: Attempting to fetch collaborators for {}/{}", owner, repo_name);
+
             if owner != "unknown" && repo_name != "unknown" {
                 match fetch_github_collaborators(owner, repo_name, token).await {
                     Ok(collaborators) => {
+                        eprintln!("DEBUG: Fetched collaborators: {:?}", collaborators);
                         allowed_users_list = Some(collaborators);
                     },
                     Err(e) => {
+                        eprintln!("DEBUG: Failed to fetch collaborators: {}", e);
                         tracing::warn!("Failed to fetch collaborators: {}. Defaulting to host only.", e);
                     }
                 }
+            } else {
+                eprintln!("DEBUG: Could not parse owner/repo from URL: {}", request.repo_url);
             }
+        } else {
+            eprintln!("DEBUG: No GitHub token available, skipping collaborator fetch.");
         }
     } else if let Some(users) = &allowed_users_list {
         // If "none" is specified, clear the list (host only)
         if users.contains(&"none".to_string()) {
+            eprintln!("DEBUG: 'none' specified, clearing allowed users.");
             allowed_users_list = Some(Vec::new());
         }
     }
