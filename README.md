@@ -103,13 +103,23 @@ common lock files.
 
 SSH is the backbone. Bring your own editor, or use `ne`.
 
-### Conflict-Free Sync Model
+### Collaboration Modes
 
-SteadyState uses a robust synchronization model designed to prevent conflicts during collaborative sessions:
+SteadyState supports two distinct modes for collaboration:
 
-*   **Session Branch Isolation**: Each session operates on a dedicated Git branch (`steadystate/collab/<session_id>`), isolating session work from the upstream `main` branch.
-*   **Y-CRDT Merge Engine**: `steadystate sync` uses a Yjs/Yrs-based CRDT merge engine to perform conflict-free 3-way merges (Base, Local, Canonical) for text files. This ensures that concurrent edits from multiple users are merged deterministically without manual conflict resolution.
-*   **Git Integration**: The merged result is committed to the session branch. Users can merge the session branch back to `main` via standard Pull Requests after the session.
+#### 1. Pair Programming (`--mode=pair`)
+*   **Powered by Upterm**: Creates a secure SSH tunnel to the host's terminal.
+*   **Shared Terminal**: All users share the same terminal session and file system state.
+*   **Ideal for**: Real-time pair programming, debugging, and teaching.
+
+#### 2. Shared Workspace (`--mode=collab`)
+*   **Shared Host, Isolated Worktrees**: All users connect to the same compute instance but work in their own isolated Git worktrees.
+*   **Canonical Repository**: A central bare repository (`canonical`) acts as the synchronization point.
+*   **Conflict-Free Sync Model**:
+    *   **Session Branch Isolation**: Each session operates on a dedicated Git branch (`steadystate/collab/<session_id>`), isolating session work from the upstream `main` branch.
+    *   **Y-CRDT Merge Engine**: `steadystate sync` uses a Yjs/Yrs-based CRDT merge engine to perform conflict-free 3-way merges (Base, Local, Canonical) for text files. This ensures that concurrent edits from multiple users are merged deterministically without manual conflict resolution.
+    *   **Git Integration**: The merged result is committed to the session branch. Users can merge the session branch back to `main` via standard Pull Requests after the session.
+*   **Ideal for**: Async collaboration, dividing work on the same feature, and avoiding "it works on my machine" issues.
 
 ---
 
