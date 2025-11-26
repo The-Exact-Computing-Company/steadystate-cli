@@ -350,6 +350,7 @@ esac
         public: bool,
         environment: Option<&str>,
         session_id: &str,
+        github_token: Option<&str>,
     ) -> Result<(u32, String)> {
         // We run upterm from the host (backend environment), which wraps the nix develop session.
         // This ensures upterm is found (since it's in the host env) and the user lands in the nix dev shell.
@@ -444,7 +445,7 @@ esac
         upterm_args.push("--accept".to_string());
 
         // 2. Authorization
-        let authorized_keys = fetch_authorized_keys(github_user, allowed_users).await;
+        let authorized_keys = fetch_authorized_keys(github_user, allowed_users, github_token).await;
         
         // Write keys to a temporary file
         let key_file_path = format!("/tmp/steadystate_authorized_keys_{}", session_id);
@@ -747,15 +748,45 @@ impl ComputeProvider for LocalComputeProvider {
             self.clone_repo(&request.repo_url, &repo_path).await?;
         }
         
-        // Extract GitHub login if available
-        let mut github_login = None;
-        if let Some(cfg) = &request.provider_config {
-             if let Some(gh_val) = cfg.get("github") {
-                if let Ok(gh) = serde_json::from_value::<GitHubComputeConfig>(gh_val.clone()) {
-                    github_login = Some(gh.login);
+        // Extract GitHub login and token if available
+    let mut github_login = None;
+    let mut github_token = None;
+    if let Some(cfg) = &request.provider_config {
+         if let Some(gh_val) = cfg.get("github") {
+            if let Ok(gh) = serde_json::from_value::<GitHubComputeConfig>(gh_val.clone()) {
+                github_login = Some(gh.login);
+                github_token = Some(gh.access_token);
+            }
+         }
+    }
+
+    // Determine allowed users
+    let mut allowed_users_list = request.allowed_users.clone();
+    
+    // If no allowed users specified (and not explicitly "none"), default to all collaborators
+    if allowed_users_list.is_none() {
+        if let Some(token) = &github_token {
+            let repo_name = request.repo_url.split('/').last().unwrap_or("unknown");
+            let owner = request.repo_url.split('/').nth_back(1).unwrap_or("unknown");
+            
+            if owner != "unknown" && repo_name != "unknown" {
+                match fetch_github_collaborators(owner, repo_name, token).await {
+                    Ok(collaborators) => {
+                        allowed_users_list = Some(collaborators);
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch collaborators: {}. Defaulting to host only.", e);
+                    }
                 }
-             }
+            }
         }
+    } else if let Some(users) = &allowed_users_list {
+        // If "none" is specified, clear the list (host only)
+        if users.contains(&"none".to_string()) {
+            allowed_users_list = Some(Vec::new());
+        }
+    }
+        
 
         // 4. Initialize Canonical Git Repo (if collab mode)
         let is_collab = request.mode.as_deref().unwrap_or("pair") == "collab";
@@ -784,13 +815,14 @@ impl ComputeProvider for LocalComputeProvider {
             };
 
             // 5. Launch SSHD for collaboration
-            let (pid, invite) = self.launch_sshd_for_collab(
-                &workspace_root,
-                github_login.as_deref(),
-                request.allowed_users.as_deref(),
-                &session.id,
-                &full_repo_name
-            ).await?;
+        let (pid, invite) = self.launch_sshd_for_collab(
+            &workspace_root,
+            github_login.as_deref(),
+            allowed_users_list.as_deref(),
+            &session.id,
+            &full_repo_name,
+            github_token.as_deref()
+        ).await?;
             
             eprintln!("DEBUG: start_session received invite: {}", invite);
 
@@ -822,10 +854,11 @@ impl ComputeProvider for LocalComputeProvider {
                 &self.flake_path,
                 &repo_path,
                 github_login.as_deref(),
-                request.allowed_users.as_deref(),
+                allowed_users_list.as_deref(),
                 request.public,
                 request.environment.as_deref(),
                 &session.id,
+                github_token.as_deref(),
             ).await?;
 
             let local_session = LocalSession {
@@ -921,6 +954,7 @@ impl LocalComputeProvider {
         allowed_users: Option<&[String]>,
         session_id: &str,
         repo_name: &str,
+        github_token: Option<&str>,
     ) -> Result<(u32, String)> {
         use tokio::process::Command;
         use tokio::time::timeout;
@@ -1004,7 +1038,7 @@ impl LocalComputeProvider {
         tracing::info!("steadystate CLI binary copied successfully.");
         
         // 3. Prepare Authorized Keys with ForceCommand
-        let authorized_keys = fetch_authorized_keys(github_user, allowed_users).await;
+        let authorized_keys = fetch_authorized_keys(github_user, allowed_users, github_token).await;
         
         if authorized_keys.is_empty() {
             return Err(anyhow!("No authorized keys found. Cannot start SSHD without at least one key."));
@@ -1336,16 +1370,23 @@ struct AuthorizedKey {
     key: String,
 }
 
-async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<&[String]>) -> Vec<AuthorizedKey> {
+async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<&[String]>, github_token: Option<&str>) -> Vec<AuthorizedKey> {
     tracing::info!("Starting fetch_authorized_keys");
     // Use a Set to deduplicate keys
     let mut unique_keys = std::collections::HashSet::new();
     let mut result = Vec::new();
     
-    let client = reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .unwrap_or_default();
+        .user_agent("steadystate-backend");
+
+    if let Some(token) = github_token {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
+        client_builder = client_builder.default_headers(headers);
+    }
+
+    let client = client_builder.build().unwrap_or_default();
 
     // 1. Add local keys
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
@@ -1380,10 +1421,10 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
     // 2. Fetch GitHub keys
     let mut users_to_fetch = Vec::new();
     if let Some(user) = github_user {
-        users_to_fetch.push(user);
+        users_to_fetch.push(user.to_string());
     }
     if let Some(users) = allowed_users {
-        users_to_fetch.extend(users.iter().map(|s| s.as_str()));
+        users_to_fetch.extend(users.iter().cloned());
     }
 
     tracing::info!("Fetching keys for users: {:?}", users_to_fetch);
@@ -1419,4 +1460,37 @@ async fn fetch_authorized_keys(github_user: Option<&str>, allowed_users: Option<
 
     tracing::info!("fetch_authorized_keys completed. Found {} keys total.", result.len());
     result
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubCollaborator {
+    login: String,
+}
+
+async fn fetch_github_collaborators(owner: &str, repo: &str, token: &str) -> Result<Vec<String>> {
+    tracing::info!("Fetching collaborators for {}/{}", owner, repo);
+    let client = reqwest::Client::builder()
+        .user_agent("steadystate-backend")
+        .build()?;
+
+    let url = format!("https://api.github.com/repos/{}/{}/collaborators", owner, repo);
+    
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        tracing::error!("Failed to fetch collaborators: HTTP {} - {}", status, text);
+        return Err(anyhow::anyhow!("Failed to fetch collaborators: HTTP {}", status));
+    }
+
+    let collaborators: Vec<GitHubCollaborator> = resp.json().await?;
+    let logins: Vec<String> = collaborators.into_iter().map(|c| c.login).collect();
+    
+    tracing::info!("Found {} collaborators: {:?}", logins.len(), logins);
+    Ok(logins)
 }
