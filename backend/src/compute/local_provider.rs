@@ -1285,7 +1285,9 @@ Subsystem sftp internal-sftp
         let current_user = std::env::var("USER").unwrap_or_else(|_| "steady".to_string());
         
         // Try to detect hostname/IP
-        let hostname = if let Ok(output) = Command::new("ip").args(&["route", "get", "1.1.1.1"]).output().await {
+        let hostname = if let Ok(host) = std::env::var("STEADYSTATE_ADVERTISED_HOST") {
+            host
+        } else if let Ok(output) = Command::new("ip").args(&["route", "get", "1.1.1.1"]).output().await {
              if output.status.success() {
                  let out = String::from_utf8_lossy(&output.stdout);
                  // Output format: "1.1.1.1 via ... src 192.168.178.42 ..."

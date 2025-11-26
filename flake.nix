@@ -79,6 +79,7 @@
           cli
           treemerge.packages.${system}.default
           upterm
+          pkgs.iproute2
         ] ++ pkgs.lib.optionals (!isCI) [ antigravity pkgs.gemini-cli ];
         shellHook = ''
           echo "🔧 Entering SteadyState dev shell"
