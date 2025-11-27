@@ -61,45 +61,53 @@ pub fn sync() -> Result<()> {
             .status()
             .context("Failed to fetch from origin")?;
         
-        if !fetch_status.success() {
-            return Err(anyhow::anyhow!("git fetch failed"));
-        }
+        let canonical_tree = if !fetch_status.success() {
+            // Check if it's because the branch doesn't exist
+            // If so, we treat it as a new branch (first push)
+            // Canonical state is effectively the base state (no remote changes yet)
+            println!("⚠️  Remote branch not found. Assuming first push for this session.");
+            println!("   Using base commit as canonical state.");
+            
+            // Materialize base tree as canonical tree
+            merge::materialize_git_tree(&canonical_path, &base_commit).context("Failed to materialize base tree (as canonical)")?
+        } else {
+            // Use origin/session_branch as canonical ref
+            let canonical_ref = format!("origin/{}", session_branch);
+            
+            // Verify the ref exists
+            let verify_status = Command::new("git")
+                .arg("-C")
+                .arg(&canonical_path)
+                .args(&["rev-parse", "--verify", &canonical_ref])
+                .status()?;
+            
+            if !verify_status.success() {
+                // Should not happen if fetch succeeded, but just in case
+                return Err(anyhow::anyhow!(
+                    "Remote branch {} does not exist after successful fetch.",
+                    canonical_ref
+                ));
+            }
 
-        // Use origin/session_branch as canonical ref
-        let canonical_ref = format!("origin/{}", session_branch);
-        
-        // Verify the ref exists
-        let verify_status = Command::new("git")
-            .arg("-C")
-            .arg(&canonical_path)
-            .args(&["rev-parse", "--verify", &canonical_ref])
-            .status()?;
-        
-        if !verify_status.success() {
-            return Err(anyhow::anyhow!(
-                "Remote branch {} does not exist. Has the session been initialized?",
-                canonical_ref
-            ));
-        }
+            // CRITICAL FIX: Reset local branch to match remote
+            println!("Updating local branch to match remote...");
+            let reset_status = Command::new("git")
+                .arg("-C")
+                .arg(&canonical_path)
+                .args(&["reset", "--hard", &canonical_ref])
+                .status()
+                .context("Failed to reset local branch")?;
 
-        // CRITICAL FIX: Reset local branch to match remote
-        println!("Updating local branch to match remote...");
-        let reset_status = Command::new("git")
-            .arg("-C")
-            .arg(&canonical_path)
-            .args(&["reset", "--hard", &canonical_ref])
-            .status()
-            .context("Failed to reset local branch")?;
-
-        if !reset_status.success() {
-            return Err(anyhow::anyhow!("Failed to reset to remote branch"));
-        }
+            if !reset_status.success() {
+                return Err(anyhow::anyhow!("Failed to reset to remote branch"));
+            }
+            
+            merge::materialize_git_tree(&canonical_path, &canonical_ref).context("Failed to materialize canonical tree")?
+        };
 
         // 4. Materialize trees
         println!("Materializing trees...");
         let base_tree = merge::materialize_git_tree(&canonical_path, &base_commit).context("Failed to materialize base tree")?;
-        
-        let canonical_tree = merge::materialize_git_tree(&canonical_path, &canonical_ref).context("Failed to materialize canonical tree")?;
         
         let local_tree = merge::materialize_fs_tree(&worktree_path).context("Failed to materialize local tree")?;
 
