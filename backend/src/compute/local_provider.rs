@@ -223,12 +223,12 @@ if [ -z "$SESSION_ROOT" ]; then
 fi
 
 CANONICAL="${CANONICAL_REPO:-$SESSION_ROOT/canonical}"
-ACTIVITY_LOG="${ACTIVITY_LOG:-$SESSION_ROOT/activity-log}"
+SYNC_LOG="${SYNC_LOG:-$SESSION_ROOT/sync-log}"
 
 log_activity() {
     local action="$1"
-    if [ -f "$ACTIVITY_LOG" ]; then
-        echo "$(date -Iseconds),$USER_ID,$action" >> "$ACTIVITY_LOG"
+    if [ -f "$SYNC_LOG" ]; then
+        echo "$(date -Iseconds),$USER_ID,$action" >> "$SYNC_LOG"
     fi
 }
 
@@ -280,9 +280,24 @@ echo "✓ Sync complete!"
         // Make executable
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&sync_path, std::fs::Permissions::from_mode(0o755))?;
+
+        // 2.5 Create initial sync-log
+        let sync_log_path = session_root.join("sync-log");
+        if !sync_log_path.exists() {
+             let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+             let initial_log = format!("{} system Session started\n", timestamp);
+             std::fs::write(&sync_log_path, initial_log).context("Failed to create initial sync-log")?;
+             std::fs::set_permissions(&sync_log_path, std::fs::Permissions::from_mode(0o644))?;
+        }
         
         // 3. Create wrapper script (steadystate)
         let wrapper_script = r#"#!/bin/bash
+# Export REPO_ROOT so CLI knows where to look for sync-log
+export REPO_ROOT="$(dirname "$PWD")"
+
 case "$1" in
     sync)
         exec steadystate-sync

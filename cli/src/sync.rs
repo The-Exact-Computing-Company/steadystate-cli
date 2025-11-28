@@ -19,7 +19,7 @@ pub fn sync() -> Result<()> {
     println!("Syncing changes (Y-CRDT)...");
 
     // 1. Determine paths
-    let repo_root = std::env::var("REPO_ROOT").unwrap_or_else(|_| "../..".to_string());
+    let repo_root = std::env::var("REPO_ROOT").unwrap_or_else(|_| "..".to_string());
     // Resolve repo_root relative to current dir if it's relative
     let repo_root_path = if Path::new(&repo_root).is_absolute() {
         Path::new(&repo_root).to_path_buf()
