@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::process::Command;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::io::Write;
 use std::fs;
 use std::time::SystemTime;
@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::merge;
 use walkdir::WalkDir;
 use fs2::FileExt;
+use similar::{ChangeTag, TextDiff};
+use crossterm::style::Stylize;
 
 #[derive(Serialize, Deserialize)]
 struct WorktreeMeta {
@@ -15,34 +17,217 @@ struct WorktreeMeta {
     last_synced_commit: String,
 }
 
+struct SyncContext {
+    repo_root_path: PathBuf,
+    canonical_path: PathBuf,
+    worktree_path: PathBuf,
+    meta_path: PathBuf,
+    meta: WorktreeMeta,
+}
+
+impl SyncContext {
+    fn new() -> Result<Self> {
+        let repo_root = std::env::var("REPO_ROOT").unwrap_or_else(|_| "..".to_string());
+        let repo_root_path = if Path::new(&repo_root).is_absolute() {
+            Path::new(&repo_root).to_path_buf()
+        } else {
+            std::env::current_dir()?.join(&repo_root).canonicalize().unwrap_or_else(|_| Path::new(&repo_root).to_path_buf())
+        };
+        
+        let canonical_path = repo_root_path.join("canonical");
+        let worktree_path = std::env::current_dir().context("Failed to get current dir")?;
+        let meta_dir = worktree_path.join(".worktree");
+        let meta_path = meta_dir.join("steadystate.json");
+
+        if !meta_path.exists() {
+            return Err(anyhow::anyhow!("Metadata file not found at {}. Session not initialized correctly.", meta_path.display()));
+        }
+        
+        let content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
+        let meta: WorktreeMeta = serde_json::from_str(&content).context("Failed to parse metadata")?;
+
+        Ok(Self {
+            repo_root_path,
+            canonical_path,
+            worktree_path,
+            meta_path,
+            meta,
+        })
+    }
+}
+
+pub async fn status_command() -> Result<()> {
+    let ctx = SyncContext::new()?;
+    
+    // Materialize trees
+    let base_tree = merge::materialize_git_tree(&ctx.canonical_path, &ctx.meta.last_synced_commit)
+        .context("Failed to materialize base tree")?;
+    let local_tree = merge::materialize_fs_tree(&ctx.worktree_path)
+        .context("Failed to materialize local tree")?;
+
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+
+    // Check for local changes vs base
+    for (path, content) in &local_tree.files {
+        match base_tree.files.get(path) {
+            Some(base_content) => {
+                if content != base_content {
+                    modified.push(path);
+                }
+            }
+            None => {
+                added.push(path);
+            }
+        }
+    }
+
+    for path in base_tree.files.keys() {
+        if !local_tree.files.contains_key(path) {
+            deleted.push(path);
+        }
+    }
+
+    if added.is_empty() && modified.is_empty() && deleted.is_empty() {
+        println!("On branch {}", ctx.meta.session_branch);
+        println!("nothing to commit, working tree clean");
+        return Ok(());
+    }
+
+    println!("On branch {}", ctx.meta.session_branch);
+    println!("Changes not staged for commit:");
+    println!("  (use \"steadystate publish\" to update the session)");
+    println!();
+
+    for path in modified {
+        println!("\t{}", format!("modified:   {}", path).red());
+    }
+    for path in deleted {
+        println!("\t{}", format!("deleted:    {}", path).red());
+    }
+    
+    if !added.is_empty() {
+        println!();
+        println!("Untracked files:");
+        println!("  (use \"steadystate publish\" to include in what will be committed)");
+        println!();
+        for path in added {
+            println!("\t{}", path.as_str().red());
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn diff_command() -> Result<()> {
+    let ctx = SyncContext::new()?;
+    
+    // Materialize trees
+    let base_tree = merge::materialize_git_tree(&ctx.canonical_path, &ctx.meta.last_synced_commit)
+        .context("Failed to materialize base tree")?;
+    let local_tree = merge::materialize_fs_tree(&ctx.worktree_path)
+        .context("Failed to materialize local tree")?;
+
+    let mut all_paths: Vec<_> = base_tree.files.keys().chain(local_tree.files.keys()).collect();
+    all_paths.sort();
+    all_paths.dedup();
+
+    for path in all_paths {
+        let base_content = base_tree.files.get(path);
+        let local_content = local_tree.files.get(path);
+
+        match (base_content, local_content) {
+            (Some(base), Some(local)) => {
+                if base != local {
+                    print_diff(path, base, local);
+                }
+            }
+            (Some(base), None) => {
+                // Deleted
+                println!("diff a/{} b/{}", path, path);
+                println!("deleted file mode 100644");
+                println!("--- a/{}", path);
+                println!("+++ /dev/null");
+                // Show all lines as deleted
+                if let Ok(s) = std::str::from_utf8(base) {
+                    for line in s.lines() {
+                        println!("{}", format!("-{}", line).red());
+                    }
+                } else {
+                    println!("Binary file {} deleted", path);
+                }
+            }
+            (None, Some(local)) => {
+                // Added
+                println!("diff a/{} b/{}", path, path);
+                println!("new file mode 100644");
+                println!("--- /dev/null");
+                println!("+++ b/{}", path);
+                // Show all lines as added
+                if let Ok(s) = std::str::from_utf8(local) {
+                    for line in s.lines() {
+                        println!("{}", format!("+{}", line).green());
+                    }
+                } else {
+                    println!("Binary file {} added", path);
+                }
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
+fn print_diff(path: &str, old: &[u8], new: &[u8]) {
+    let old_str = match std::str::from_utf8(old) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("Binary files a/{} and b/{} differ", path, path);
+            return;
+        }
+    };
+    let new_str = match std::str::from_utf8(new) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("Binary files a/{} and b/{} differ", path, path);
+            return;
+        }
+    };
+
+    let diff = TextDiff::from_lines(old_str, new_str);
+
+    println!("diff a/{} b/{}", path, path);
+    println!("--- a/{}", path);
+    println!("+++ b/{}", path);
+
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
+        };
+        let line = format!("{}{}", sign, change);
+        match change.tag() {
+            ChangeTag::Delete => print!("{}", line.red()),
+            ChangeTag::Insert => print!("{}", line.green()),
+            ChangeTag::Equal => print!("{}", line),
+        }
+    }
+}
+
 pub async fn sync() -> Result<()> {
     println!("Syncing changes (Y-CRDT)...");
 
-    // 1. Determine paths
-    let repo_root = std::env::var("REPO_ROOT").unwrap_or_else(|_| "..".to_string());
-    // Resolve repo_root relative to current dir if it's relative
-    let repo_root_path = if Path::new(&repo_root).is_absolute() {
-        Path::new(&repo_root).to_path_buf()
-    } else {
-        std::env::current_dir()?.join(&repo_root).canonicalize().unwrap_or_else(|_| Path::new(&repo_root).to_path_buf())
-    };
-    
-    let canonical_path = repo_root_path.join("canonical");
-    
-    let worktree_path = std::env::current_dir().context("Failed to get current dir")?;
-    let meta_dir = worktree_path.join(".worktree");
-    let meta_path = meta_dir.join("steadystate.json");
-
-    // 2. Load metadata
-    if !meta_path.exists() {
-        return Err(anyhow::anyhow!("Metadata file not found at {}. Session not initialized correctly.", meta_path.display()));
-    }
-    
-    let content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
-    let meta: WorktreeMeta = serde_json::from_str(&content).context("Failed to parse metadata")?;
-    
-    let base_commit = meta.last_synced_commit;
-    let session_branch = meta.session_branch;
+    let ctx = SyncContext::new()?;
+    let base_commit = ctx.meta.last_synced_commit;
+    let session_branch = ctx.meta.session_branch;
+    let canonical_path = ctx.canonical_path;
+    let worktree_path = ctx.worktree_path;
+    let meta_dir = ctx.meta_path.parent().unwrap().to_path_buf();
+    let meta_path = ctx.meta_path; // Move happens here
+    let repo_root_path = ctx.repo_root_path;
 
     println!("Base commit: {}", base_commit);
     println!("Session branch: {}", session_branch);
