@@ -347,6 +347,7 @@ fn build_base_update(base: &str) -> Result<Vec<u8>> {
     Ok(doc.transact().encode_state_as_update_v1(&yrs::StateVector::default()))
 }
 
+
 fn build_side_update(base_update: &[u8], base: &str, side: &str) -> Result<Vec<u8>> {
     let doc = Doc::new();
     {
@@ -360,20 +361,36 @@ fn build_side_update(base_update: &[u8], base: &str, side: &str) -> Result<Vec<u
     let diff = TextDiff::from_chars(base, side);
     {
         let mut txn = doc.transact_mut();
-        let mut pos = 0;
-
+        let mut pos: u32 = 0;
+        
         for change in diff.iter_all_changes() {
+            let value = change.value();
+            let len = value.encode_utf16().count() as u32;
+            
             match change.tag() {
                 ChangeTag::Equal => {
-                    pos += change.value().encode_utf16().count() as u32;
+                    // Content matches - advance position past it
+                    pos += len;
                 }
                 ChangeTag::Delete => {
-                    let len = change.value().encode_utf16().count() as u32;
-                    txt.remove_range(&mut txn, pos, len);
+                    // Remove content at current position
+                    // Safety check: ensure we don't try to remove beyond document end
+                    let doc_content = txt.get_string(&txn);
+                    let doc_len = doc_content.encode_utf16().count() as u32;
+                    
+                    if pos < doc_len {
+                        let remove_len = len.min(doc_len - pos);
+                        if remove_len > 0 {
+                            txt.remove_range(&mut txn, pos, remove_len);
+                        }
+                    }
+                    // DON'T advance pos - the content is now gone
                 }
                 ChangeTag::Insert => {
-                    txt.insert(&mut txn, pos, change.value());
-                    pos += change.value().encode_utf16().count() as u32;
+                    // Insert new content at current position
+                    txt.insert(&mut txn, pos, value);
+                    // Advance position past the inserted content
+                    pos += len;
                 }
             }
         }
