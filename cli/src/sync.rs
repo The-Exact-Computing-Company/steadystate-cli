@@ -198,23 +198,152 @@ fn print_diff(path: &str, old: &[u8], new: &[u8]) {
 
     let diff = TextDiff::from_lines(old_str, new_str);
 
-    println!("diff a/{} b/{}", path, path);
-    println!("--- a/{}", path);
-    println!("+++ b/{}", path);
+    // Use unified diff format with context
+    print!("{}", diff.unified_diff().context_radius(3).header(path, path));
+}
 
-    for change in diff.iter_all_changes() {
-        let sign = match change.tag() {
-            ChangeTag::Delete => "-",
-            ChangeTag::Insert => "+",
-            ChangeTag::Equal => " ",
-        };
-        let line = format!("{}{}", sign, change);
-        match change.tag() {
-            ChangeTag::Delete => print!("{}", line.red()),
-            ChangeTag::Insert => print!("{}", line.green()),
-            ChangeTag::Equal => print!("{}", line),
+pub async fn publish_command() -> Result<()> {
+    let ctx = SyncContext::new()?;
+    let session_branch = ctx.meta.session_branch;
+    let canonical_path = ctx.canonical_path;
+    let worktree_path = ctx.worktree_path;
+    let repo_root_path = ctx.repo_root_path;
+
+    println!("Publishing changes to {}...", session_branch);
+
+    // Scope the lock
+    {
+        let _lock = lock_canonical(&canonical_path)?;
+
+        // 1. Update canonical from worktree (Staging)
+        println!("Staging changes...");
+        sync_canonical_from_worktree(&worktree_path, &canonical_path)?;
+
+        // 2. Commit
+        println!("Committing...");
+        
+        // Generate commit message with active users
+        let sync_log_path = repo_root_path.join("sync-log");
+        let users = get_active_users(&sync_log_path).unwrap_or_else(|_| vec!["unknown".to_string()]);
+        let user_list = users.join(", ");
+        let msg = format!("Changes from collab session between {}", user_list);
+
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&canonical_path)
+            .args(&["add", "-A"])
+            .status()?;
+        
+        if !status.success() { return Err(anyhow::anyhow!("git add failed")); }
+
+        let diff_status = Command::new("git")
+            .arg("-C")
+            .arg(&canonical_path)
+            .args(&["diff", "--cached", "--quiet"])
+            .status()?;
+
+        if !diff_status.success() {
+            let commit_status = Command::new("git")
+                .arg("-C")
+                .arg(&canonical_path)
+                .args(&["commit", "-m", &msg, "--author", "SteadyState Bot <bot@steadystate.dev>"])
+                .status()?;
+                
+            if !commit_status.success() { return Err(anyhow::anyhow!("git commit failed")); }
+        } else {
+            println!("No changes to commit.");
+        }
+
+        // 3. Push
+        println!("Pushing to remote...");
+        let push_status = Command::new("git")
+            .arg("-C")
+            .arg(&canonical_path)
+            .args(&["push", "origin", &session_branch])
+            .status()?;
+            
+        if !push_status.success() {
+            eprintln!("❌ Push failed. The remote branch is likely ahead of your local state.");
+            eprintln!("💡 Run 'steadystate sync' to merge remote changes into your worktree, then try publishing again.");
+            return Err(anyhow::anyhow!("Push failed"));
         }
     }
+
+    println!("✅ Publish complete!");
+    Ok(())
+}
+
+fn get_active_users(log_path: &Path) -> Result<Vec<String>> {
+    if !log_path.exists() {
+        let user = std::env::var("STEADYSTATE_USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "unknown".to_string());
+        return Ok(vec![user]);
+    }
+
+    let content = fs::read_to_string(log_path)?;
+    let mut users = Vec::new();
+    // Simple parsing: just get all unique users from the log
+    // In a real scenario, we might want to filter by recent time window
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let user = parts[1].to_string();
+            if !users.contains(&user) {
+                users.push(user);
+            }
+        }
+    }
+    
+    if users.is_empty() {
+        let user = std::env::var("STEADYSTATE_USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "unknown".to_string());
+        users.push(user);
+    }
+    
+    Ok(users)
+}
+
+fn sync_canonical_from_worktree(worktree_path: &Path, canonical_path: &Path) -> Result<()> {
+    // 1. Clear canonical (except .git)
+    for entry in fs::read_dir(canonical_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.file_name().unwrap() == ".git" { 
+            continue; 
+        }
+        
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+
+    // 2. Copy from worktree (except .worktree, .git)
+    for entry in WalkDir::new(worktree_path).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        
+        let rel_path = path.strip_prefix(worktree_path)?;
+        let rel_path_str = rel_path.to_string_lossy();
+        
+        if rel_path_str.starts_with(".git") || rel_path_str.contains("/.git/") || 
+           rel_path_str.starts_with(".worktree") || rel_path_str.contains("/.worktree/") {
+            continue;
+        }
+
+        let dest_path = canonical_path.join(rel_path);
+        if let Some(parent) = dest_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(path, dest_path)?;
+    }
+
+    Ok(())
 }
 
 pub async fn sync() -> Result<()> {
@@ -401,20 +530,9 @@ pub async fn sync() -> Result<()> {
         fs::write(&meta_path, serde_json::to_string_pretty(&new_meta)?)?;
     } // Lock released here
 
-    // 9. Push (without lock)
-    println!("Pushing to remote...");
-    let push_status = Command::new("git")
-        .arg("-C")
-        .arg(&canonical_path)
-        .args(&["push", "origin", &session_branch])
-        .status()?;
-        
-    if !push_status.success() { 
-        eprintln!("⚠️  Warning: Push failed. Your changes are committed locally but not synced to remote.");
-        eprintln!("   You can manually push from: {}", canonical_path.display());
-        eprintln!("   Run: cd {} && git push origin {}", canonical_path.display(), session_branch);
-    }
-
+    // 9. Push (REMOVED: Push is now handled by `steadystate publish`)
+    // println!("Pushing to remote...");
+    
     // 10. Reset local worktree
     println!("Refreshing worktree...");
     sync_worktree_from_canonical(&canonical_path, &worktree_path)?;

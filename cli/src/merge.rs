@@ -34,6 +34,7 @@ fn is_ignored(path: &str) -> bool {
     
     file_name == ".viminfo" ||
     file_name == ".DS_Store" ||
+    file_name == ".lesshst" ||
     file_name == "Thumbs.db" ||
     file_name.ends_with(".swp") ||
     file_name.ends_with('~') ||

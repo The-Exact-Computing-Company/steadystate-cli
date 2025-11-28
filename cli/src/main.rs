@@ -633,8 +633,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Publish => {
-            // Publish is an alias for sync
-            if let Err(e) = sync::sync().await {
+            if let Err(e) = sync::publish_command().await {
                 eprintln!("publish failed: {:#}", e);
                 std::process::exit(1);
             }
