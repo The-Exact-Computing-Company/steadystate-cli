@@ -1189,7 +1189,8 @@ WELCOME
 # Handle SSH_ORIGINAL_COMMAND
 if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
     # If the command is just setting up the shell (interactive), print welcome
-    if [[ "$SSH_ORIGINAL_COMMAND" == *"exec $SHELL"* ]] || [[ "$SSH_ORIGINAL_COMMAND" == *"exec bash"* ]]; then
+    # We check for STEADYSTATE_USERNAME which is injected by the CLI for interactive sessions
+    if [[ "$SSH_ORIGINAL_COMMAND" == *"STEADYSTATE_USERNAME"* ]]; then
         print_welcome
     fi
     exec bash -c "$SSH_ORIGINAL_COMMAND"
