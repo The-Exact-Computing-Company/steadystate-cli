@@ -88,6 +88,12 @@ enum Commands {
     Sync,
     /// Watch for sync events (Collaboration Mode)
     Watch,
+    /// Show the working tree status
+    Status,
+    /// Show changes between the working tree and the last synced state
+    Diff,
+    /// Publish changes to the canonical repository (alias for sync)
+    Publish,
 }
 
 #[derive(Serialize)]
@@ -611,6 +617,24 @@ async fn main() -> Result<()> {
         Commands::Watch => {
             if let Err(e) = notify::watch() {
                 eprintln!("watch failed: {:#}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Status => {
+            if let Err(e) = sync::status_command().await {
+                eprintln!("status failed: {:#}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Diff => {
+            if let Err(e) = sync::diff_command().await {
+                eprintln!("diff failed: {:#}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Publish => {
+            if let Err(e) = sync::publish_command().await {
+                eprintln!("publish failed: {:#}", e);
                 std::process::exit(1);
             }
         }

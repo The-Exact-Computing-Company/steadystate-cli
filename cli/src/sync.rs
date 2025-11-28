@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::process::Command;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::io::Write;
 use std::fs;
 use std::time::SystemTime;
@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::merge;
 use walkdir::WalkDir;
 use fs2::FileExt;
+use similar::{ChangeTag, TextDiff};
+use crossterm::style::Stylize;
 
 #[derive(Serialize, Deserialize)]
 struct WorktreeMeta {
@@ -15,34 +17,378 @@ struct WorktreeMeta {
     last_synced_commit: String,
 }
 
+struct SyncContext {
+    repo_root_path: PathBuf,
+    canonical_path: PathBuf,
+    worktree_path: PathBuf,
+    meta_path: PathBuf,
+    meta: WorktreeMeta,
+}
+
+impl SyncContext {
+    fn new() -> Result<Self> {
+        let repo_root = std::env::var("REPO_ROOT").unwrap_or_else(|_| "..".to_string());
+        let repo_root_path = if Path::new(&repo_root).is_absolute() {
+            Path::new(&repo_root).to_path_buf()
+        } else {
+            std::env::current_dir()?.join(&repo_root).canonicalize().unwrap_or_else(|_| Path::new(&repo_root).to_path_buf())
+        };
+        
+        let canonical_path = repo_root_path.join("canonical");
+        let worktree_path = std::env::current_dir().context("Failed to get current dir")?;
+        let meta_dir = worktree_path.join(".worktree");
+        let meta_path = meta_dir.join("steadystate.json");
+
+        if !meta_path.exists() {
+            return Err(anyhow::anyhow!("Metadata file not found at {}. Session not initialized correctly.", meta_path.display()));
+        }
+        
+        let content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
+        let meta: WorktreeMeta = serde_json::from_str(&content).context("Failed to parse metadata")?;
+
+        Ok(Self {
+            repo_root_path,
+            canonical_path,
+            worktree_path,
+            meta_path,
+            meta,
+        })
+    }
+}
+
+pub async fn status_command() -> Result<()> {
+    let ctx = SyncContext::new()?;
+    
+    // Materialize trees
+    let base_tree = merge::materialize_git_tree(&ctx.canonical_path, &ctx.meta.last_synced_commit)
+        .context("Failed to materialize base tree")?;
+    let local_tree = merge::materialize_fs_tree(&ctx.worktree_path)
+        .context("Failed to materialize local tree")?;
+
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+
+    // Check for local changes vs base
+    for (path, content) in &local_tree.files {
+        match base_tree.files.get(path) {
+            Some(base_content) => {
+                if content != base_content {
+                    modified.push(path);
+                }
+            }
+            None => {
+                added.push(path);
+            }
+        }
+    }
+
+    for path in base_tree.files.keys() {
+        if !local_tree.files.contains_key(path) {
+            deleted.push(path);
+        }
+    }
+
+    if added.is_empty() && modified.is_empty() && deleted.is_empty() {
+        println!("On branch {}", ctx.meta.session_branch);
+        println!("nothing to commit, working tree clean");
+        return Ok(());
+    }
+
+    println!("On branch {}", ctx.meta.session_branch);
+    println!("Changes not staged for commit:");
+    println!("  (use \"steadystate publish\" to update the session)");
+    println!();
+
+    for path in modified {
+        println!("\t{}", format!("modified:   {}", path).red());
+    }
+    for path in deleted {
+        println!("\t{}", format!("deleted:    {}", path).red());
+    }
+    
+    if !added.is_empty() {
+        println!();
+        println!("Untracked files:");
+        println!("  (use \"steadystate publish\" to include in what will be committed)");
+        println!();
+        for path in added {
+            println!("\t{}", path.as_str().red());
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn diff_command() -> Result<()> {
+    let ctx = SyncContext::new()?;
+    
+    // Materialize trees
+    let base_tree = merge::materialize_git_tree(&ctx.canonical_path, &ctx.meta.last_synced_commit)
+        .context("Failed to materialize base tree")?;
+    let local_tree = merge::materialize_fs_tree(&ctx.worktree_path)
+        .context("Failed to materialize local tree")?;
+
+    let mut all_paths: Vec<_> = base_tree.files.keys().chain(local_tree.files.keys()).collect();
+    all_paths.sort();
+    all_paths.dedup();
+
+    for path in all_paths {
+        let base_content = base_tree.files.get(path);
+        let local_content = local_tree.files.get(path);
+
+        match (base_content, local_content) {
+            (Some(base), Some(local)) => {
+                if base != local {
+                    print_diff(path, base, local);
+                }
+            }
+            (Some(base), None) => {
+                // Deleted
+                println!("diff a/{} b/{}", path, path);
+                println!("deleted file mode 100644");
+                println!("--- a/{}", path);
+                println!("+++ /dev/null");
+                // Show all lines as deleted
+                if let Ok(s) = std::str::from_utf8(base) {
+                    for line in s.lines() {
+                        println!("{}", format!("-{}", line).red());
+                    }
+                } else {
+                    println!("Binary file {} deleted", path);
+                }
+            }
+            (None, Some(local)) => {
+                // Added
+                println!("diff a/{} b/{}", path, path);
+                println!("new file mode 100644");
+                println!("--- /dev/null");
+                println!("+++ b/{}", path);
+                // Show all lines as added
+                if let Ok(s) = std::str::from_utf8(local) {
+                    for line in s.lines() {
+                        println!("{}", format!("+{}", line).green());
+                    }
+                } else {
+                    println!("Binary file {} added", path);
+                }
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
+fn print_diff(path: &str, old: &[u8], new: &[u8]) {
+    let old_str = match std::str::from_utf8(old) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("Binary files a/{} and b/{} differ", path, path);
+            return;
+        }
+    };
+    let new_str = match std::str::from_utf8(new) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("Binary files a/{} and b/{} differ", path, path);
+            return;
+        }
+    };
+
+    let diff = TextDiff::from_lines(old_str, new_str);
+
+    // Use unified diff format with context
+    print!("{}", diff.unified_diff().context_radius(3).header(path, path));
+}
+
+pub async fn publish_command() -> Result<()> {
+    let ctx = SyncContext::new()?;
+    let session_branch = ctx.meta.session_branch;
+    let canonical_path = ctx.canonical_path;
+    let worktree_path = ctx.worktree_path;
+    let repo_root_path = ctx.repo_root_path;
+
+    println!("Publishing changes to {}...", session_branch);
+
+    // Resolve current user for fallback
+    let current_user = match crate::session::read_session(None).await {
+        Ok(session) => session.login,
+        Err(_) => std::env::var("STEADYSTATE_USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "unknown".to_string()),
+    };
+
+    // Scope the lock
+    {
+        let _lock = lock_canonical(&canonical_path)?;
+
+        // 1. Update canonical from worktree (Staging)
+        println!("Staging changes...");
+        sync_canonical_from_worktree(&worktree_path, &canonical_path)?;
+
+        // 2. Commit
+        println!("Committing...");
+        
+        // Generate commit message with active users
+        let sync_log_path = repo_root_path.join("sync-log");
+        let users = get_active_users(&sync_log_path, &current_user).unwrap_or_else(|_| vec![current_user.clone()]);
+        let user_list = users.join(", ");
+        let msg = format!("Changes from collab session between {}", user_list);
+
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&canonical_path)
+            .args(&["add", "-A"])
+            .status()?;
+        
+        if !status.success() { return Err(anyhow::anyhow!("git add failed")); }
+
+        let diff_status = Command::new("git")
+            .arg("-C")
+            .arg(&canonical_path)
+            .args(&["diff", "--cached", "--quiet"])
+            .status()?;
+
+        if !diff_status.success() {
+            let commit_status = Command::new("git")
+                .arg("-C")
+                .arg(&canonical_path)
+                .args(&["commit", "-m", &msg, "--author", "SteadyState Bot <bot@steadystate.dev>"])
+                .status()?;
+                
+            if !commit_status.success() { return Err(anyhow::anyhow!("git commit failed")); }
+        } else {
+            println!("No changes to commit.");
+        }
+
+        // 3. Push to local canonical repo (intermediate)
+        println!("Pushing to session repo...");
+        let push_status = Command::new("git")
+            .arg("-C")
+            .arg(&canonical_path)
+            .args(&["push", "origin", &session_branch])
+            .status()?;
+            
+        if !push_status.success() {
+            eprintln!("❌ Push to session repo failed. The remote branch is likely ahead of your local state.");
+            eprintln!("💡 Run 'steadystate sync' to merge remote changes into your worktree, then try publishing again.");
+            return Err(anyhow::anyhow!("Push failed"));
+        }
+
+        // 4. Push from session repo to GitHub (origin)
+        println!("Pushing to GitHub...");
+        // The 'repo' directory is a sibling of 'canonical'
+        let repo_path = canonical_path.parent().unwrap().join("repo");
+        
+        // We use -C because 'repo' is a bare repository (or might be)
+        // If it's not bare, this still works if pointing to the .git dir, but here 'repo' IS the git dir if bare.
+        // However, local_provider.rs initializes it as a clone. If it's a bare clone, 'repo' is the dir.
+        
+        let github_push_status = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(&["push", "origin", &session_branch])
+            .status()?;
+
+        if !github_push_status.success() {
+            eprintln!("⚠️  Warning: Push to GitHub failed.");
+            eprintln!("   Your changes are saved in the session, but could not be pushed to GitHub.");
+            eprintln!("   Check your internet connection or GitHub permissions.");
+            // We don't return error here because the session state is consistent locally
+        }
+    }
+
+    println!("✅ Publish complete!");
+    Ok(())
+}
+
+fn get_active_users(log_path: &Path, current_user: &str) -> Result<Vec<String>> {
+    if !log_path.exists() {
+        return Ok(vec![current_user.to_string()]);
+    }
+
+    let content = fs::read_to_string(log_path)?;
+    let mut users = Vec::new();
+    // Simple parsing: just get all unique users from the log
+    // In a real scenario, we might want to filter by recent time window
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let user = parts[1].to_string();
+            if !users.contains(&user) {
+                users.push(user);
+            }
+        }
+    }
+    
+    if users.is_empty() {
+        users.push(current_user.to_string());
+    }
+    
+    Ok(users)
+}
+
+fn sync_canonical_from_worktree(worktree_path: &Path, canonical_path: &Path) -> Result<()> {
+    // 1. Clear canonical (except .git)
+    for entry in fs::read_dir(canonical_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.file_name().unwrap() == ".git" { 
+            continue; 
+        }
+        
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+
+    // 2. Copy from worktree (except .worktree, .git)
+    for entry in WalkDir::new(worktree_path).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        
+        let rel_path = path.strip_prefix(worktree_path)?;
+        let rel_path_str = rel_path.to_string_lossy();
+        
+        if rel_path_str.starts_with(".git") || rel_path_str.contains("/.git/") || 
+           rel_path_str.starts_with(".worktree") || rel_path_str.contains("/.worktree/") {
+            continue;
+        }
+
+        let dest_path = canonical_path.join(rel_path);
+        if let Some(parent) = dest_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(path, dest_path)?;
+    }
+
+    Ok(())
+}
+
 pub async fn sync() -> Result<()> {
     println!("Syncing changes (Y-CRDT)...");
 
-    // 1. Determine paths
-    let repo_root = std::env::var("REPO_ROOT").unwrap_or_else(|_| "..".to_string());
-    // Resolve repo_root relative to current dir if it's relative
-    let repo_root_path = if Path::new(&repo_root).is_absolute() {
-        Path::new(&repo_root).to_path_buf()
-    } else {
-        std::env::current_dir()?.join(&repo_root).canonicalize().unwrap_or_else(|_| Path::new(&repo_root).to_path_buf())
-    };
-    
-    let canonical_path = repo_root_path.join("canonical");
-    
-    let worktree_path = std::env::current_dir().context("Failed to get current dir")?;
-    let meta_dir = worktree_path.join(".worktree");
-    let meta_path = meta_dir.join("steadystate.json");
+    let ctx = SyncContext::new()?;
+    let base_commit = ctx.meta.last_synced_commit;
+    let session_branch = ctx.meta.session_branch;
+    let canonical_path = ctx.canonical_path;
+    let worktree_path = ctx.worktree_path;
+    let meta_dir = ctx.meta_path.parent().unwrap().to_path_buf();
+    let meta_path = ctx.meta_path; // Move happens here
+    let repo_root_path = ctx.repo_root_path;
 
-    // 2. Load metadata
-    if !meta_path.exists() {
-        return Err(anyhow::anyhow!("Metadata file not found at {}. Session not initialized correctly.", meta_path.display()));
-    }
-    
-    let content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
-    let meta: WorktreeMeta = serde_json::from_str(&content).context("Failed to parse metadata")?;
-    
-    let base_commit = meta.last_synced_commit;
-    let session_branch = meta.session_branch;
+    // Resolve user early
+    let user = match crate::session::read_session(None).await {
+        Ok(session) => session.login,
+        Err(_) => std::env::var("STEADYSTATE_USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "unknown".to_string()),
+    };
 
     println!("Base commit: {}", base_commit);
     println!("Session branch: {}", session_branch);
@@ -184,7 +530,7 @@ pub async fn sync() -> Result<()> {
 
         // 7. Commit
         println!("Committing...");
-        if let Err(e) = commit_changes(&canonical_path, &session_branch) {
+        if let Err(e) = commit_changes(&canonical_path, &session_branch, &user) {
             eprintln!("❌ Failed to commit: {}", e);
             eprintln!("🔄 Attempting recovery from backup...");
             
@@ -216,20 +562,9 @@ pub async fn sync() -> Result<()> {
         fs::write(&meta_path, serde_json::to_string_pretty(&new_meta)?)?;
     } // Lock released here
 
-    // 9. Push (without lock)
-    println!("Pushing to remote...");
-    let push_status = Command::new("git")
-        .arg("-C")
-        .arg(&canonical_path)
-        .args(&["push", "origin", &session_branch])
-        .status()?;
-        
-    if !push_status.success() { 
-        eprintln!("⚠️  Warning: Push failed. Your changes are committed locally but not synced to remote.");
-        eprintln!("   You can manually push from: {}", canonical_path.display());
-        eprintln!("   Run: cd {} && git push origin {}", canonical_path.display(), session_branch);
-    }
-
+    // 9. Push (REMOVED: Push is now handled by `steadystate publish`)
+    // println!("Pushing to remote...");
+    
     // 10. Reset local worktree
     println!("Refreshing worktree...");
     sync_worktree_from_canonical(&canonical_path, &worktree_path)?;
@@ -237,14 +572,6 @@ pub async fn sync() -> Result<()> {
     // 11. Update sync-log
     let sync_log_path = repo_root_path.join("sync-log");
     
-    // Try to get username from session, fallback to env var
-    let user = match crate::session::read_session(None).await {
-        Ok(session) => session.login,
-        Err(_) => std::env::var("STEADYSTATE_USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "unknown".to_string()),
-    };
-
     let timestamp = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -256,7 +583,7 @@ pub async fn sync() -> Result<()> {
     Ok(())
 }
 
-fn commit_changes(repo_path: &Path, _branch: &str) -> Result<()> {
+fn commit_changes(repo_path: &Path, _branch: &str, user: &str) -> Result<()> {
     let status = Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -272,7 +599,6 @@ fn commit_changes(repo_path: &Path, _branch: &str) -> Result<()> {
         .status()?;
 
     if !diff_status.success() {
-        let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
         let msg = format!("sync: SteadyState session by {}", user);
         
         let commit_status = Command::new("git")
