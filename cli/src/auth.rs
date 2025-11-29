@@ -15,15 +15,9 @@ use crate::config::{
     JWT_REFRESH_BUFFER_SECS, MAX_NETWORK_RETRIES, RETRY_DELAY_MS, SERVICE_NAME,
 };
 use crate::session::{read_session, remove_session, write_session, Session};
+use steadystate_common::types::{SessionInfo, SessionState, DeviceFlowResponse};
 
-#[derive(Deserialize)]
-struct DeviceResponse {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    expires_in: u64,
-    interval: Option<u64>,
-}
+type DeviceResponse = DeviceFlowResponse;
 
 #[derive(Deserialize)]
 struct PollResponse {
@@ -34,14 +28,7 @@ struct PollResponse {
     error: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct UpResponse {
-    pub id: String,
-    pub state: String,
-    pub endpoint: Option<String>,
-    pub magic_link: Option<String>,
-    pub message: Option<String>,
-}
+pub type UpResponse = SessionInfo;
 
 /// Initiates OAuth device flow authentication.
 pub async fn device_login(client: &Client, provider: &str) -> Result<()> {
@@ -66,7 +53,7 @@ pub async fn device_login(client: &Client, provider: &str) -> Result<()> {
     }
 
     let poll_url = format!("{}/auth/poll", &*BACKEND_URL);
-    let interval = dr.interval.unwrap_or(5).max(1);
+    let interval = dr.interval.max(1);
     let max_interval_secs = DEVICE_POLL_MAX_INTERVAL_SECS.max(interval);
     let device_code = dr.device_code.clone();
     let expires_in = dr.expires_in;

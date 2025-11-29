@@ -97,8 +97,9 @@ impl LocalComputeProvider {
         
         // Create canonical repo
         let canonical = workspace.root.join("canonical");
+        let repo_path_str = workspace.repo_path.to_str().ok_or_else(|| anyhow!("Invalid repo path"))?;
         git.clone(
-            workspace.repo_path.to_str().unwrap(),
+            repo_path_str,
             &canonical,
             None,
             None,
@@ -128,7 +129,7 @@ impl LocalComputeProvider {
         self.install_scripts(workspace, &branch_name).await?;
         
         // Launch SSHD
-        let (pid, invite) = self.launch_sshd(
+        let (pid, invite, fingerprint) = self.launch_sshd(
             workspace,
             &authorized_keys,
             session_id,
@@ -143,8 +144,9 @@ impl LocalComputeProvider {
         
         Ok(SessionStartResult {
             endpoint: Some(format!("ssh://{}", invite)),
-            magic_link: Some(format!("steadystate://collab/{}?ssh={}", 
-                session_id, urlencoding::encode(&invite))),
+            magic_link: Some(format!("steadystate://collab/{}?ssh={}&fingerprint={}", 
+                session_id, urlencoding::encode(&invite), urlencoding::encode(&fingerprint))),
+            host_key_fingerprint: Some(fingerprint),
         })
     }
 
@@ -189,6 +191,7 @@ impl LocalComputeProvider {
             endpoint: Some(invite.clone()),
             magic_link: Some(format!("steadystate://pair/{}?ssh={}", 
                 session_id, urlencoding::encode(&invite))),
+            host_key_fingerprint: None, // Upterm manages its own keys
         })
     }
     
@@ -215,7 +218,7 @@ impl LocalComputeProvider {
         authorized_keys: &[crate::compute::common::ssh_keys::AuthorizedKey],
         session_id: &str,
         branch_name: &str,
-    ) -> Result<(u32, String)> {
+    ) -> Result<(u32, String, String)> {
         let ssh_dir = workspace.root.join("ssh");
         self.executor.mkdir_p(&ssh_dir, 0o700).await?;
 
@@ -231,7 +234,7 @@ impl LocalComputeProvider {
         // Create wrapper script
         let wrapper_content = scripts::collab_wrapper_script().render(&{
             let mut vars = HashMap::new();
-            vars.insert("session_root", workspace.root.to_str().unwrap());
+            vars.insert("session_root", workspace.root.to_str().ok_or_else(|| anyhow!("Invalid workspace root"))?);
             vars.insert("session_id", session_id);
             vars.insert("repo_name", "repo"); // TODO: get actual repo name
             vars.insert("branch_name", branch_name);
@@ -247,7 +250,7 @@ impl LocalComputeProvider {
         let pid_file = ssh_dir.join("sshd.pid");
         let config = SshdConfig {
             port,
-            host_key_path,
+            host_key_path: host_key_path.clone(),
             authorized_keys_path: auth_keys_path,
             pid_file_path: pid_file.clone(),
             log_level: SshdLogLevel::Info,
@@ -259,9 +262,10 @@ impl LocalComputeProvider {
 
         let sshd_binary = sshd::find_sshd_binary(self.executor.as_ref()).await?;
         
+        let config_path_str = config_path.to_str().ok_or_else(|| anyhow!("Invalid config path"))?;
         let (pid, _, _) = self.executor.exec_streaming(
             &sshd_binary,
-            &["-f", config_path.to_str().unwrap(), "-D"], // -D to run in foreground so we can manage it
+            &["-f", config_path_str, "-D"], // -D to run in foreground so we can manage it
         ).await?;
 
         // TODO: Wait for port to be open?
@@ -270,7 +274,26 @@ impl LocalComputeProvider {
         let hostname = "localhost"; // TODO: Get actual hostname or IP
         let invite = format!("{}@{} -p {}", "user", hostname, port);
 
-        Ok((pid, invite))
+        // Get fingerprint
+        let host_key_path_str = host_key_path.to_str().ok_or_else(|| anyhow!("Invalid host key path"))?;
+        let fingerprint_output = self.executor.exec("ssh-keygen", &["-lf", host_key_path_str]).await?;
+        let fingerprint = if fingerprint_output.exit_status.success() {
+            // Output format: "256 SHA256:xxxxxxxx... root@host (ED25519)"
+            // We want the "SHA256:..." part
+            let stdout = fingerprint_output.stdout;
+            let parts: Vec<&str> = stdout.split_whitespace().collect();
+            if parts.len() >= 2 {
+                parts[1].to_string()
+            } else {
+                tracing::warn!("Failed to parse fingerprint from: {}", stdout);
+                String::new()
+            }
+        } else {
+            tracing::warn!("Failed to get host key fingerprint: {}", fingerprint_output.stderr);
+            String::new()
+        };
+
+        Ok((pid, invite, fingerprint))
     }
 
     async fn launch_upterm(
@@ -284,7 +307,7 @@ impl LocalComputeProvider {
         let args = vec![
             "host",
             "--authorized-keys",
-            auth_keys_path.to_str().unwrap(),
+            auth_keys_path.to_str().ok_or_else(|| anyhow!("Invalid auth keys path"))?,
             "--accept",
             "--",
             "bash"
@@ -369,10 +392,13 @@ impl ComputeProvider for LocalComputeProvider {
     async fn terminate_session(&self, session: &Session) -> Result<()> {
         if let Some((_, local_session)) = self.state.live_sessions.remove(&session.id) {
             // Kill process
-            self.executor
+            // Kill process
+            if let Err(e) = self.executor
                 .exec_shell(&format!("kill -TERM {}", local_session.pid))
-                .await
-                .ok();
+                .await 
+            {
+                tracing::warn!("Failed to kill process {}: {}", local_session.pid, e);
+            }
                 
             // Cleanup workspace
             self.executor.remove_all(&local_session.workspace_root).await?;

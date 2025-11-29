@@ -58,6 +58,7 @@ async fn run_provisioning(
                 session.state = SessionState::Running;
                 session.endpoint = start_result.endpoint;
                 session.magic_link = start_result.magic_link;
+                session.host_key_fingerprint = start_result.host_key_fingerprint;
                 session.updated_at = std::time::SystemTime::now();
                 tracing::info!("Session {} provisioned successfully", session_id);
             }
@@ -93,17 +94,18 @@ async fn create_session(
     let session = Session {
         id: session_id.clone(),
         state: SessionState::Provisioning,
-        _repo_url: request.repo_url.clone(),
-        _branch: request.branch.clone(),
-        _environment: request.environment.clone(),
+        repo_url: request.repo_url.clone(),
+        branch: request.branch.clone(),
+        environment: request.environment.clone(),
         endpoint: None,
         // FIX IS HERE: Access default_compute_provider via config
         compute_provider: state.config.default_compute_provider.clone(),
-        _creator_login: claims.sub.clone(),
-        _created_at: now,
+        creator_login: claims.sub.clone(),
+        created_at: now,
         updated_at: now,
         error_message: None,
         magic_link: None,
+        host_key_fingerprint: None,
     };
 
     let session_info = SessionInfo::from(&session);

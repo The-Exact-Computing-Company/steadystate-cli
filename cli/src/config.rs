@@ -4,7 +4,7 @@ pub const SERVICE_NAME: &str = "steadystate";
 pub const BACKEND_ENV: &str = "STEADYSTATE_BACKEND"; // e.g. https://api.steadystate.dev
 pub const CONFIG_OVERRIDE_ENV: &str = "STEADYSTATE_CONFIG_DIR";
 /// Default URL for the backend API.
-pub const DEFAULT_BACKEND: &str = "https://localhost:8080";
+pub const DEFAULT_BACKEND: &str = "http://localhost:8080";
 
 /// Buffer time (in seconds) before JWT expiry to trigger proactive refresh.
 /// Set to 60s to ensure refresh completes before actual expiry.

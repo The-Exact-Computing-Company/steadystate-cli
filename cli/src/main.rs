@@ -25,6 +25,7 @@ use auth::{
 };
 use config::{BACKEND_URL, CLI_VERSION, HTTP_TIMEOUT_SECS, USER_AGENT};
 use session::{read_session, remove_session};
+use steadystate_common::types::SessionState;
 
 #[derive(Parser)]
 #[command(
@@ -258,6 +259,7 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
     .await?;
 
     let mut final_endpoint = resp.endpoint.clone();
+    let mut final_fingerprint = resp.host_key_fingerprint.clone();
 
 
     if json {
@@ -266,7 +268,7 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
         println!("✅ Session created: {}", resp.id);
         
         // Poll until the session is ready or fails
-        if resp.endpoint.is_none() && resp.state == "Provisioning" {
+        if resp.endpoint.is_none() && resp.state == SessionState::Provisioning {
             println!("⏳ Provisioning session...");
             
             let mut attempts = 0;
@@ -286,9 +288,10 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                 )
                 .await?;
                 
-                match status.state.as_str() {
-                    "Running" => {
+                match status.state {
+                    SessionState::Running => {
                         final_endpoint = status.endpoint;
+                        final_fingerprint = status.host_key_fingerprint;
                         let final_magic_link = status.magic_link; // Update magic link from status
                         
                         if let Some(endpoint) = &final_endpoint {
@@ -302,14 +305,14 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                         }
                         break;
                     }
-                    "Failed" => {
+                    SessionState::Failed => {
                         println!("❌ Session provisioning failed");
                         if let Some(msg) = status.message {
                             println!("Error: {}", msg);
                         }
                         return Err(anyhow::anyhow!("Session provisioning failed"));
                     }
-                    "Provisioning" => {
+                    SessionState::Provisioning => {
                         if attempts >= max_attempts {
                             println!("⏱️  Timed out waiting for session. Check status later with:");
                             println!("  curl -H 'Authorization: Bearer <token>' {}/sessions/{}", &*BACKEND_URL, resp.id);
@@ -318,7 +321,7 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                         // Continue polling
                     }
                     other => {
-                        println!("Session state: {}", other);
+                        println!("Session state: {:?}", other);
                     }
                 }
             }
@@ -347,9 +350,23 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                         "-p".to_string(),
                         port.to_string(),
                         "-t".to_string(), // Force PTY for TUI
-                        "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
-                        "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
                     ];
+                    
+                    if let Some(fingerprint) = final_fingerprint {
+                        let known_hosts = format!("[{}]:{} {}", host, port, fingerprint);
+                        let known_hosts_path = format!("/tmp/steadystate-{}-known_hosts", resp.id);
+                        std::fs::write(&known_hosts_path, known_hosts)?;
+                        
+                        args.extend([
+                            "-o".to_string(), format!("UserKnownHostsFile={}", known_hosts_path),
+                            "-o".to_string(), "StrictHostKeyChecking=yes".to_string(),
+                        ]);
+                    } else {
+                        args.extend([
+                            "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+                            "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+                        ]);
+                    }
                     
                     let target = if !user.is_empty() {
                         format!("{}@{}", user, host)
@@ -430,6 +447,10 @@ async fn join(url_str: String) -> Result<()> {
                     .map(|(_, val)| val.to_string())
                     .ok_or_else(|| anyhow::anyhow!("Invalid collab link: missing 'ssh' parameter"))?;
                 
+                let fingerprint = pairs
+                    .find(|(key, _)| key == "fingerprint")
+                    .map(|(_, val)| val.to_string());
+                
                 println!("Joining collaboration session...");
                 println!("Connecting to: {}", ssh_url);
                 
@@ -442,12 +463,32 @@ async fn join(url_str: String) -> Result<()> {
                 let mut args = vec![
                     "-p".to_string(),
                     port.to_string(),
-                    "-o".to_string(),
-                    "StrictHostKeyChecking=no".to_string(), // For ephemeral hosts
-                    "-o".to_string(),
-                    "UserKnownHostsFile=/dev/null".to_string(),
-                    "-t".to_string(), // Force PTY
                 ];
+
+                if let Some(fp) = fingerprint {
+                    // We don't have session ID easily here, use random or hash of url
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    url_str.hash(&mut hasher);
+                    let session_id = format!("{:x}", hasher.finish());
+
+                    let known_hosts = format!("[{}]:{} {}", host, port, fp);
+                    let known_hosts_path = format!("/tmp/steadystate-{}-known_hosts", session_id);
+                    std::fs::write(&known_hosts_path, known_hosts)?;
+                    
+                    args.extend([
+                        "-o".to_string(), format!("UserKnownHostsFile={}", known_hosts_path),
+                        "-o".to_string(), "StrictHostKeyChecking=yes".to_string(),
+                    ]);
+                } else {
+                    args.extend([
+                        "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+                        "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+                    ]);
+                }
+
+                args.push("-t".to_string()); // Force PTY
                 
                 if !user.is_empty() {
                     args.push(format!("{}@{}", user, host));
