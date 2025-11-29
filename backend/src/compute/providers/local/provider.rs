@@ -380,7 +380,8 @@ impl LocalComputeProvider {
         }
 
         // Determine public IP/Hostname
-        let hostname = "localhost"; // TODO: Get actual hostname or IP
+        // Determine public IP/Hostname
+        let hostname = Self::get_external_hostname().await;
         // Construct a valid SSH URL: ssh://user@hostname:port
         let user = crate::compute::ssh_session_user();
         tracing::info!("Using SSH user: '{}' for session invite", user);
@@ -448,6 +449,44 @@ impl LocalComputeProvider {
         
         Ok((pid, invite))
     }
+
+    /// Get a hostname/IP that external machines can use to connect
+    async fn get_external_hostname() -> String {
+        // 1. Check for explicit environment variable override
+        if let Ok(host) = std::env::var("STEADYSTATE_EXTERNAL_HOST") {
+            return host;
+        }
+        
+        // 2. Try to get the machine's hostname
+        if let Ok(hostname) = hostname::get() {
+            if let Some(hostname_str) = hostname.to_str() {
+                // Don't use "localhost" as that won't work for remote clients
+                if hostname_str != "localhost" && !hostname_str.is_empty() {
+                    return hostname_str.to_string();
+                }
+            }
+        }
+        
+        // 3. Try to get the local IP address
+        if let Ok(ip) = Self::get_local_ip() {
+            return ip;
+        }
+        
+        // 4. Fallback to localhost (only works for same-machine connections)
+        tracing::warn!("Could not determine external hostname, falling back to localhost");
+        "localhost".to_string()
+    }
+    
+    /// Get the local network IP address
+    fn get_local_ip() -> Result<String, ()> {
+        // Use a UDP socket to determine which interface would be used
+        // to reach an external address (doesn't actually send data)
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|_| ())?;
+        socket.connect("8.8.8.8:80").map_err(|_| ())?;
+        let addr = socket.local_addr().map_err(|_| ())?;
+        Ok(addr.ip().to_string())
+    }
+
     fn extract_github_config(&self, request: &SessionRequest) -> (Option<String>, Option<String>) {
         if let Some(cfg) = &request.provider_config {
              if let Some(gh_val) = cfg.get("github") {
