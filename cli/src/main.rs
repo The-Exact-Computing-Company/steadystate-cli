@@ -178,7 +178,9 @@ async fn logout(client: &Client) -> Result<()> {
         }
     }
 
-    let _ = delete_refresh_token(&username, None).await;
+    if let Err(e) = delete_refresh_token(&username, None).await {
+        eprintln!("Warning: Failed to delete refresh token: {}", e);
+    }
     let _ = remove_session(None).await;
     println!("Logged out (local tokens removed).");
     Ok(())

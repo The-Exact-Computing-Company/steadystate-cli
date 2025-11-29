@@ -317,10 +317,8 @@ impl LocalComputeProvider {
         });
         self.executor.write_file(&workspace.root.join("bin/steadystate-wrapper"), wrapper_content.as_bytes(), 0o755).await?;
 
-        // Find a free port (simplified for now, just pick random or let OS pick if possible, but sshd needs explicit port)
-        // For now, let's assume we can bind to port 0 and get the port, but sshd might not support that easily without parsing logs.
-        // Let's pick a random port for now.
-        let port = 2222 + (rand::random::<u16>() % 1000); // TODO: Better port selection
+        // Find a free port using OS assignment
+        let port = self.find_available_port().await?;
 
         let pid_file = ssh_dir.join("sshd.pid");
         let config = SshdConfig {
@@ -485,6 +483,16 @@ impl LocalComputeProvider {
         socket.connect("8.8.8.8:80").map_err(|_| ())?;
         let addr = socket.local_addr().map_err(|_| ())?;
         Ok(addr.ip().to_string())
+    }
+
+    async fn find_available_port(&self) -> Result<u16> {
+        // Try to bind to port 0 to get an OS-assigned free port
+        // We bind to 0.0.0.0 because sshd will listen on all interfaces
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
+        let port = listener.local_addr()?.port();
+        // Drop the listener to free the port so sshd can bind to it
+        drop(listener);
+        Ok(port)
     }
 
     fn extract_github_config(&self, request: &SessionRequest) -> (Option<String>, Option<String>) {

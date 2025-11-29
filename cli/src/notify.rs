@@ -106,7 +106,7 @@ pub fn watch() -> Result<()> {
             if parts.len() >= 2 {
                 // Format: timestamp user
                 if let Ok(ts) = parts[0].parse::<i64>() {
-                    let dt: DateTime<Local> = Local.timestamp_opt(ts, 0).unwrap();
+                    let dt: DateTime<Local> = Local.timestamp_opt(ts, 0).single().unwrap_or_default();
                     println!("  [{}] {} synced", dt.format("%H:%M:%S"), parts[1]);
                 } else {
                     println!("  [{}] {} synced", parts[0], parts[1]);
