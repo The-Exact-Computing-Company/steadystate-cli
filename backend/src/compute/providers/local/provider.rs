@@ -457,7 +457,12 @@ impl LocalComputeProvider {
             return host;
         }
         
-        // 2. Try to get the machine's hostname
+        // 2. Try to get the local IP address (Prioritize IP over hostname for reliability)
+        if let Ok(ip) = Self::get_local_ip() {
+            return ip;
+        }
+
+        // 3. Try to get the machine's hostname
         if let Ok(hostname) = hostname::get() {
             if let Some(hostname_str) = hostname.to_str() {
                 // Don't use "localhost" as that won't work for remote clients
@@ -465,11 +470,6 @@ impl LocalComputeProvider {
                     return hostname_str.to_string();
                 }
             }
-        }
-        
-        // 3. Try to get the local IP address
-        if let Ok(ip) = Self::get_local_ip() {
-            return ip;
         }
         
         // 4. Fallback to localhost (only works for same-machine connections)
