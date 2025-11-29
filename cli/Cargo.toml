@@ -22,6 +22,7 @@ clap = { version = "4.5", features = ["derive"] }
 
 # Error handling
 anyhow = "1.0"
+steadystate-common = { path = "../packages/common" }
 
 # Secure credential storage
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native"] }
@@ -52,6 +53,7 @@ crossterm = "0.29.0"
 yrs = "0.18"
 similar = "2.4"
 walkdir = "2"
+chrono = "0.4"
 
 
 [dev-dependencies]

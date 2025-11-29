@@ -1,3 +1,2 @@
-//! Common utilities for the SteadyState workspace.
-
-pub fn placeholder() {}
+pub mod types;
+// pub mod error; // Uncomment when we have shared errors

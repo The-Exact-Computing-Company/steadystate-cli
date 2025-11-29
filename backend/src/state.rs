@@ -9,12 +9,16 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::auth::provider::{AuthProviderDyn, AuthProviderFactoryDyn};
-use crate::compute::local_provider::LocalComputeProvider;
-use crate::compute::ComputeProvider;
+use crate::compute::{ComputeProvider, LocalComputeProvider, LocalProviderConfig};
 use crate::jwt::JwtKeys;
 use crate::models::{PendingDevice, ProviderId, RefreshRecord, Session};
 
 pub type SessionStore = DashMap<String, Session>;
+
+const DEFAULT_DEVICE_POLL_INTERVAL: u64 = 15;
+const DEFAULT_JWT_TTL: u64 = 900; // 15 minutes
+const DEFAULT_REFRESH_TTL: u64 = 14 * 24 * 3600; // 14 days
+const HTTP_POOL_MAX_IDLE_PER_HOST: usize = 8;
 
 // --- Centralized Configuration ---
 #[derive(Clone)]
@@ -23,13 +27,18 @@ pub struct Config {
     pub enable_fake_auth: bool,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
-    pub _gitlab_client_id: Option<String>,
-    pub _gitlab_client_secret: Option<String>,
-    pub _orchid_client_id: Option<String>,
-    pub _orchid_client_secret: Option<String>,
+    #[allow(dead_code)]
+    pub gitlab_client_id: Option<String>,
+    #[allow(dead_code)]
+    pub gitlab_client_secret: Option<String>,
+    #[allow(dead_code)]
+    pub orchid_client_id: Option<String>,
+    #[allow(dead_code)]
+    pub orchid_client_secret: Option<String>,
     
     // Timeouts & TTLs
-    pub _device_poll_interval: u64,
+    #[allow(dead_code)]
+    pub device_poll_interval: u64,
     pub jwt_ttl_secs: u64,
     pub refresh_ttl_secs: u64,
 
@@ -44,17 +53,17 @@ impl Config {
             enable_fake_auth: std::env::var("ENABLE_FAKE_AUTH").is_ok(),
             github_client_id: std::env::var("GITHUB_CLIENT_ID").ok(),
             github_client_secret: std::env::var("GITHUB_CLIENT_SECRET").ok(),
-            _gitlab_client_id: std::env::var("GITLAB_CLIENT_ID").ok(),
-            _gitlab_client_secret: std::env::var("GITLAB_CLIENT_SECRET").ok(),
-            _orchid_client_id: std::env::var("ORCHID_CLIENT_ID").ok(),
-            _orchid_client_secret: std::env::var("ORCHID_CLIENT_SECRET").ok(),
+            gitlab_client_id: std::env::var("GITLAB_CLIENT_ID").ok(),
+            gitlab_client_secret: std::env::var("GITLAB_CLIENT_SECRET").ok(),
+            orchid_client_id: std::env::var("ORCHID_CLIENT_ID").ok(),
+            orchid_client_secret: std::env::var("ORCHID_CLIENT_SECRET").ok(),
             
-            _device_poll_interval: std::env::var("DEVICE_POLL_MAX_INTERVAL_SECS")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(15),
+            device_poll_interval: std::env::var("DEVICE_POLL_MAX_INTERVAL_SECS")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_DEVICE_POLL_INTERVAL),
             jwt_ttl_secs: std::env::var("JWT_TTL_SECS")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(900),
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_JWT_TTL),
             refresh_ttl_secs: std::env::var("REFRESH_TTL_SECS")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(14 * 24 * 3600),
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_REFRESH_TTL),
             
             noenv_flake_path: std::env::var("NOENV_FLAKE_PATH")
                 .context("NOENV_FLAKE_PATH must be set")?,
@@ -91,10 +100,15 @@ impl AppState {
         // 1. Load Config first to fail fast on missing env vars
         let config = Config::from_env()?;
 
+        tracing::warn!(
+            "⚠️  Using in-memory storage. All sessions will be lost on restart. \
+            Set DATABASE_URL for persistent storage."
+        );
+
         let http = Client::builder()
             .user_agent("steadystate-backend/0.1")
             .timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(8)
+            .pool_max_idle_per_host(HTTP_POOL_MAX_IDLE_PER_HOST)
             .build()
             .context("build reqwest client")?;
 
@@ -106,7 +120,13 @@ impl AppState {
         let mut compute_providers = HashMap::<String, Arc<dyn ComputeProvider>>::new();
 
         // Initialize local provider using config path
-        let local_provider = Arc::new(LocalComputeProvider::new(config.noenv_flake_path.clone().into()));
+        let provider_config = LocalProviderConfig {
+            session_root: std::env::var("STEADYSTATE_SESSION_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| dirs::home_dir().expect("HOME not set").join(".steadystate").join("sessions")),
+            flake_path: config.noenv_flake_path.clone().into(),
+        };
+        let local_provider = Arc::new(LocalComputeProvider::new(provider_config));
         compute_providers.insert(local_provider.id().to_string(), local_provider);
 
         // 3. Build State

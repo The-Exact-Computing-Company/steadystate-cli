@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use std::process::Command;
+use anyhow::{Context, Result, anyhow};
+use tokio::process::Command;
 use std::path::{Path, PathBuf};
 use std::io::Write;
 use std::fs;
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::merge;
 use walkdir::WalkDir;
 use fs2::FileExt;
-use similar::{ChangeTag, TextDiff};
+use similar::TextDiff;
 use crossterm::style::Stylize;
 
 #[derive(Serialize, Deserialize)]
@@ -240,7 +240,8 @@ pub async fn publish_command() -> Result<()> {
             .arg("-C")
             .arg(&canonical_path)
             .args(&["add", "-A"])
-            .status()?;
+            .status()
+            .await?;
         
         if !status.success() { return Err(anyhow::anyhow!("git add failed")); }
 
@@ -248,14 +249,16 @@ pub async fn publish_command() -> Result<()> {
             .arg("-C")
             .arg(&canonical_path)
             .args(&["diff", "--cached", "--quiet"])
-            .status()?;
+            .status()
+            .await?;
 
         if !diff_status.success() {
             let commit_status = Command::new("git")
                 .arg("-C")
                 .arg(&canonical_path)
                 .args(&["commit", "-m", &msg, "--author", "SteadyState Bot <bot@steadystate.dev>"])
-                .status()?;
+                .status()
+                .await?;
                 
             if !commit_status.success() { return Err(anyhow::anyhow!("git commit failed")); }
         } else {
@@ -268,7 +271,8 @@ pub async fn publish_command() -> Result<()> {
             .arg("-C")
             .arg(&canonical_path)
             .args(&["push", "origin", &session_branch])
-            .status()?;
+            .status()
+            .await?;
             
         if !push_status.success() {
             eprintln!("❌ Push to session repo failed. The remote branch is likely ahead of your local state.");
@@ -289,7 +293,8 @@ pub async fn publish_command() -> Result<()> {
             .arg("-C")
             .arg(&repo_path)
             .args(&["push", "origin", &session_branch])
-            .status()?;
+            .status()
+            .await?;
 
         if !github_push_status.success() {
             eprintln!("⚠️  Warning: Push to GitHub failed.");
@@ -334,7 +339,7 @@ fn sync_canonical_from_worktree(worktree_path: &Path, canonical_path: &Path) -> 
     for entry in fs::read_dir(canonical_path)? {
         let entry = entry?;
         let path = entry.path();
-        if path.file_name().unwrap() == ".git" { 
+        if path.file_name().map_or(false, |n| n == ".git") { 
             continue; 
         }
         
@@ -396,7 +401,10 @@ pub async fn sync() -> Result<()> {
     // Scope the lock so it is released before push
     {
         // Lock canonical to prevent concurrent syncs
-        let _lock = lock_canonical(&canonical_path)?;
+        let canonical_path_clone = canonical_path.clone();
+        let _lock = tokio::task::spawn_blocking(move || lock_canonical(&canonical_path_clone))
+            .await
+            .context("Lock task panicked")??;
 
         // 3. Fetch latest changes BEFORE materializing
         println!("Fetching latest changes...");
@@ -404,10 +412,11 @@ pub async fn sync() -> Result<()> {
             .arg("-C")
             .arg(&canonical_path)
             .args(&["fetch", "origin", &session_branch])
-            .status()
+            .output() // Use output() to capture stderr
+            .await
             .context("Failed to fetch from origin")?;
         
-        let canonical_tree = if !fetch_status.success() {
+        let canonical_tree = if !fetch_status.status.success() {
             // Check if it's because the branch doesn't exist
             // If so, we treat it as a new branch (first push)
             // Canonical state is effectively the base state (no remote changes yet)
@@ -425,7 +434,8 @@ pub async fn sync() -> Result<()> {
                 .arg("-C")
                 .arg(&canonical_path)
                 .args(&["rev-parse", "--verify", &canonical_ref])
-                .status()?;
+                .status()
+                .await?;
             
             if !verify_status.success() {
                 // Should not happen if fetch succeeded, but just in case
@@ -442,6 +452,7 @@ pub async fn sync() -> Result<()> {
                 .arg(&canonical_path)
                 .args(&["reset", "--hard", &canonical_ref])
                 .status()
+                .await
                 .context("Failed to reset local branch")?;
 
             if !reset_status.success() {
@@ -490,16 +501,25 @@ pub async fn sync() -> Result<()> {
                 .as_secs()
         );
         
-        let current_head = get_git_head(&canonical_path)?;
+        let current_head = get_git_head(&canonical_path).await?;
         Command::new("git")
             .arg("-C")
             .arg(&canonical_path)
             .args(&["update-ref", &backup_ref, &current_head])
             .status()
+            .await
             .context("Failed to create backup ref")?;
 
         println!("Applying to canonical...");
-        if let Err(e) = apply_tree_to_canonical(&canonical_path, &merged_tree, &session_branch) {
+        let canonical_path_clone = canonical_path.clone();
+        let merged_tree_clone = merged_tree.clone();
+        let session_branch_clone = session_branch.clone();
+        
+        let apply_result = tokio::task::spawn_blocking(move || {
+            apply_tree_to_canonical(&canonical_path_clone, &merged_tree_clone, &session_branch_clone)
+        }).await.context("Apply task panicked")?;
+
+        if let Err(e) = apply_result {
             eprintln!("❌ Failed to apply tree: {}", e);
             eprintln!("🔄 Attempting recovery from backup...");
             
@@ -508,7 +528,8 @@ pub async fn sync() -> Result<()> {
                 .arg("-C")
                 .arg(&canonical_path)
                 .args(&["reset", "--hard", &backup_ref])
-                .status();
+                .status()
+                .await;
                 
             match reset_status {
                 Ok(status) if status.success() => {
@@ -530,30 +551,35 @@ pub async fn sync() -> Result<()> {
 
         // 7. Commit
         println!("Committing...");
-        if let Err(e) = commit_changes(&canonical_path, &session_branch, &user) {
+        if let Err(e) = commit_changes(&canonical_path, &session_branch, &user).await {
             eprintln!("❌ Failed to commit: {}", e);
             eprintln!("🔄 Attempting recovery from backup...");
             
+            // Restore from backup
             // Restore from backup
             Command::new("git")
                 .arg("-C")
                 .arg(&canonical_path)
                 .args(&["reset", "--hard", &backup_ref])
-                .status()?;
+                .status()
+                .await?;
                 
             return Err(anyhow::anyhow!("Commit failed, restored previous state. Error: {}", e));
         }
 
         // Clean up backup
-        Command::new("git")
+        if let Err(e) = Command::new("git")
             .arg("-C")
             .arg(&canonical_path)
             .args(&["update-ref", "-d", &backup_ref])
             .status()
-            .ok();
+            .await 
+        {
+            tracing::warn!("Failed to clean up backup ref {}: {}", backup_ref, e);
+        }
 
         // 8. Update metadata IMMEDIATELY after commit
-        let new_head = get_git_head(&canonical_path)?;
+        let new_head = get_git_head(&canonical_path).await?;
         let new_meta = WorktreeMeta { 
             session_branch: session_branch.clone(),
             last_synced_commit: new_head 
@@ -577,18 +603,19 @@ pub async fn sync() -> Result<()> {
         .unwrap_or_default()
         .as_secs();
         
-    append_to_sync_log(&sync_log_path, &user, timestamp)?;
+    append_to_sync_log(&sync_log_path, &user, timestamp).await?;
 
     println!("✅ Sync complete!");
     Ok(())
 }
 
-fn commit_changes(repo_path: &Path, _branch: &str, user: &str) -> Result<()> {
+async fn commit_changes(repo_path: &Path, _branch: &str, user: &str) -> Result<()> {
     let status = Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .args(&["add", "-A"])
-        .status()?;
+        .status()
+        .await?;
     
     if !status.success() { return Err(anyhow::anyhow!("git add failed")); }
 
@@ -596,7 +623,8 @@ fn commit_changes(repo_path: &Path, _branch: &str, user: &str) -> Result<()> {
         .arg("-C")
         .arg(repo_path)
         .args(&["diff", "--cached", "--quiet"])
-        .status()?;
+        .status()
+        .await?;
 
     if !diff_status.success() {
         let msg = format!("sync: SteadyState session by {}", user);
@@ -605,7 +633,8 @@ fn commit_changes(repo_path: &Path, _branch: &str, user: &str) -> Result<()> {
             .arg("-C")
             .arg(repo_path)
             .args(&["commit", "-m", &msg, "--author", "SteadyState Bot <bot@steadystate.dev>"])
-            .status()?;
+            .status()
+            .await?;
             
         if !commit_status.success() { return Err(anyhow::anyhow!("git commit failed")); }
     }
@@ -613,31 +642,39 @@ fn commit_changes(repo_path: &Path, _branch: &str, user: &str) -> Result<()> {
     Ok(())
 }
 
-fn append_to_sync_log(log_path: &Path, user: &str, timestamp: u64) -> Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .context("Failed to open sync-log")?;
+async fn append_to_sync_log(log_path: &Path, user: &str, timestamp: u64) -> Result<()> {
+    let log_path = log_path.to_path_buf();
+    let user = user.to_string();
     
-    // Lock for append
-    file.lock_exclusive()
-        .context("Failed to lock sync-log")?;
-    
-    let log_entry = format!("{} {}\n", timestamp, user);
-    (&file).write_all(log_entry.as_bytes())
-        .context("Failed to write to sync-log")?;
-    
-    FileExt::unlock(&file).ok();
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("Failed to open sync-log")?;
+        
+        // Lock for append
+        file.lock_exclusive()
+            .context("Failed to lock sync-log")?;
+        
+        let log_entry = format!("{} {}\n", timestamp, user);
+        (&file).write_all(log_entry.as_bytes())
+            .context("Failed to write to sync-log")?;
+        
+        if let Err(e) = FileExt::unlock(&file) {
+            tracing::warn!("Failed to unlock sync-log: {}", e);
+        }
+        Ok(())
+    }).await.context("Sync log task panicked")?
 }
 
-fn get_git_head(repo_path: &Path) -> Result<String> {
+async fn get_git_head(repo_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .args(&["rev-parse", "HEAD"])
-        .output()?;
+        .output()
+        .await?;
     if !output.status.success() { return Err(anyhow::anyhow!("git rev-parse HEAD failed")); }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -669,7 +706,7 @@ fn apply_tree_to_canonical(
     }
     
     // Safety check 3: Verify we're on the expected branch
-    let current_branch_output = Command::new("git")
+    let current_branch_output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .args(&["rev-parse", "--abbrev-ref", "HEAD"])
@@ -700,7 +737,7 @@ fn apply_tree_to_canonical(
     for entry in fs::read_dir(repo_path)? {
         let entry = entry?;
         let path = entry.path();
-        if path.file_name().unwrap() == ".git" { 
+        if path.file_name().map_or(false, |n| n == ".git") { 
             continue; 
         }
         
@@ -731,7 +768,7 @@ fn sync_worktree_from_canonical(canonical_path: &Path, worktree_path: &Path) -> 
     // 1. Clear worktree (except .worktree and .git if it exists)
     for entry in WalkDir::new(worktree_path).min_depth(1).max_depth(1).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        let name = path.file_name().unwrap().to_string_lossy();
+        let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
         if name == ".worktree" || name == ".git" {
             continue;
         }
@@ -769,7 +806,7 @@ fn sync_worktree_from_canonical(canonical_path: &Path, worktree_path: &Path) -> 
 fn lock_canonical(repo_path: &Path) -> Result<std::fs::File> {
     use fs2::FileExt;
     let lock_path = repo_path.join(".steadystate.lock");
-    let file = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -777,5 +814,17 @@ fn lock_canonical(repo_path: &Path) -> Result<std::fs::File> {
         .context("Failed to open lock file")?;
     
     file.lock_exclusive().context("Failed to acquire lock")?;
+    
+    // Write PID to lock file for debugging
+    // Note: We do not remove the file on drop because that introduces a race condition
+    // where a new process creates a new inode while another process locks the old one.
+    // flock cleans up the lock itself when the FD is closed (process death).
+    if let Err(e) = file.set_len(0) {
+        tracing::warn!("Failed to truncate lock file: {}", e);
+    }
+    if let Err(e) = file.write_all(format!("{}", std::process::id()).as_bytes()) {
+        tracing::warn!("Failed to write PID to lock file: {}", e);
+    }
+    
     Ok(file)
 }

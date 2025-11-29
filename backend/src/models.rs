@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::auth::provider::UserIdentity;
+pub use steadystate_common::types::{SessionInfo, SessionState, DeviceFlowResponse};
 
 // ============================================================================
 //  Authentication & Identity Models
@@ -26,11 +27,16 @@ impl From<&str> for ProviderId {
 #[derive(Clone)]
 pub struct PendingDevice {
     pub provider: ProviderId,
-    pub _device_code: String,
-    pub _user_code: String,
-    pub _verification_uri: String,
-    pub _interval: u64,
-    pub _created_at: u64,
+    #[allow(dead_code)]
+    pub device_code: String,
+    #[allow(dead_code)]
+    pub user_code: String,
+    #[allow(dead_code)]
+    pub verification_uri: String,
+    #[allow(dead_code)]
+    pub interval: u64,
+    #[allow(dead_code)]
+    pub created_at: u64,
 }
 
 #[derive(Clone)]
@@ -40,14 +46,7 @@ pub struct RefreshRecord {
     pub expires_at: u64,
 }
 
-#[derive(Serialize)]
-pub struct DeviceStartResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub expires_in: u64,
-    pub interval: u64,
-}
+pub type DeviceStartResponse = DeviceFlowResponse;
 
 #[derive(Serialize)]
 pub struct PollOut {
@@ -106,30 +105,29 @@ pub struct UserInfo {
 //  Compute & Session Models
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SessionState {
-    Provisioning,
-    Running,
-    Failed,
-    Terminating,
-    Terminated,
-}
+// SessionState is now imported from steadystate_common::types
 
 /// The internal representation of a session, stored in the backend.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
     pub state: SessionState,
-    pub _repo_url: String,
-    pub _branch: Option<String>,
-    pub _environment: Option<String>,
+    #[allow(dead_code)]
+    pub repo_url: String,
+    #[allow(dead_code)]
+    pub branch: Option<String>,
+    #[allow(dead_code)]
+    pub environment: Option<String>,
     pub endpoint: Option<String>,
     pub compute_provider: String,
-    pub _creator_login: String,
-    pub _created_at: std::time::SystemTime,
+    #[allow(dead_code)]
+    pub creator_login: String,
+    #[allow(dead_code)]
+    pub created_at: std::time::SystemTime,
     pub updated_at: std::time::SystemTime,
     pub error_message: Option<String>,
     pub magic_link: Option<String>,
+    pub host_public_key: Option<String>,
 }
 
 /// The request from the CLI to create a new session.
@@ -157,26 +155,16 @@ pub struct MagicLink {
     pub upterm_url: Option<String>,
 }
 
-/// The information about a session that is sent back to the CLI.
-#[derive(Debug, Serialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub state: SessionState,
-    pub endpoint: Option<String>,
-    pub compute_provider: String,
-    pub message: Option<String>,
-    pub magic_link: Option<String>,
-}
-
 impl From<&Session> for SessionInfo {
     fn from(session: &Session) -> Self {
         Self {
             id: session.id.clone(),
             state: session.state.clone(),
             endpoint: session.endpoint.clone(),
-            compute_provider: session.compute_provider.clone(),
+            compute_provider: Some(session.compute_provider.clone()),
             message: session.error_message.clone(),
             magic_link: session.magic_link.clone(),
+            host_public_key: session.host_public_key.clone(),
         }
     }
 }
@@ -186,4 +174,5 @@ impl From<&Session> for SessionInfo {
 pub struct SessionStartResult {
     pub endpoint: Option<String>,
     pub magic_link: Option<String>,
+    pub host_public_key: Option<String>,
 }

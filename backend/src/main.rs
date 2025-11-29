@@ -15,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
     let app: Router = Router::new()
         .nest("/auth", steadystate_backend::routes::auth::router())
         .nest("/sessions", steadystate_backend::routes::sessions::router())
+        .nest("/health", steadystate_backend::routes::health::router())
         // Pass Arc<AppState> directly - do NOT dereference and clone!
         // Each clone of Arc points to the same underlying AppState.
         .with_state(state.clone()) 

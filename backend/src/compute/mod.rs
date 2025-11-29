@@ -2,23 +2,23 @@
 
 use crate::models::{Session, SessionRequest};
 
-pub mod local_provider;
+pub mod traits;
+pub mod types;
+pub mod error;
+pub mod common;
+pub mod providers;
 
-#[cfg(test)]
-mod tests;
+pub use traits::ComputeProvider;
+pub use providers::local::provider::{LocalComputeProvider, LocalProviderConfig};
 
-#[async_trait::async_trait]
-pub trait ComputeProvider: Send + Sync + std::fmt::Debug {
-    fn id(&self) -> &'static str;
-
-    async fn start_session(
-        &self,
-        session_id: &str,
-        request: &SessionRequest,
-    ) -> anyhow::Result<crate::models::SessionStartResult>;
-
-    async fn terminate_session(
-        &self,
-        session: &Session,
-    ) -> anyhow::Result<()>;
+/// The system user used for SSH sessions across all providers.
+/// This user must exist on any machine running the backend.
+/// Priority:
+/// 1. STEADYSTATE_SSH_USER env var
+/// 2. USER env var (current user running the backend)
+/// 3. "steadystate" (default fallback)
+pub fn ssh_session_user() -> String {
+    std::env::var("STEADYSTATE_SSH_USER")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "steadystate".to_string())
 }

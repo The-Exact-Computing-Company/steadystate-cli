@@ -2712,6 +2712,7 @@ name = "steadystate"
 version = "0.0.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "crossterm 0.29.0",
  "dirs 6.0.0",
@@ -2726,6 +2727,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "steadystate-common",
  "tempfile",
  "tokio",
  "tracing",
@@ -2756,6 +2758,7 @@ dependencies = [
  "serde_json",
  "serde_qs",
  "shell-escape",
+ "steadystate-common",
  "thiserror 2.0.17",
  "time",
  "tokio",
@@ -2771,6 +2774,9 @@ dependencies = [
 [[package]]
 name = "steadystate-common"
 version = "0.0.1"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "strsim"

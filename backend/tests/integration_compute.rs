@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use steadystate_backend::compute::local_provider::LocalComputeProvider;
+use steadystate_backend::compute::LocalComputeProvider;
+use steadystate_backend::compute::LocalProviderConfig;
 use steadystate_backend::compute::ComputeProvider;
 use steadystate_backend::models::{Session, SessionRequest, SessionState};
 
@@ -12,7 +13,14 @@ async fn test_integration_nix_check() {
 
     // We need a dummy flake path.
     let flake_path = PathBuf::from("/tmp/dummy-flake");
-    let provider = LocalComputeProvider::new(flake_path);
+    let session_root = PathBuf::from("/tmp/steadystate-sessions");
+    
+    let config = LocalProviderConfig {
+        session_root,
+        flake_path,
+    };
+    
+    let provider = LocalComputeProvider::new(config);
 
     // We can't easily call private methods like ensure_nix_installed directly unless we expose them or use start_session.
     // Using start_session involves cloning and upterm, which is heavy.
@@ -30,17 +38,18 @@ async fn test_integration_nix_check() {
 
     let session = Session {
         id: "integration-test-session".into(),
-        _repo_url: "https://github.com/this-repo/does-not-exist-12345.git".into(),
-        _branch: None,
-        _environment: None,
+        repo_url: "https://github.com/this-repo/does-not-exist-12345.git".into(),
+        branch: None,
+        environment: None,
         compute_provider: "local".into(),
-        _creator_login: "integration-user".into(),
+        creator_login: "integration-user".into(),
         state: SessionState::Provisioning,
         endpoint: None,
-        _created_at: std::time::SystemTime::now(),
+        created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
         error_message: None,
         magic_link: None,
+        host_public_key: None,
     };
 
     let request = SessionRequest {
