@@ -9,8 +9,7 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::auth::provider::{AuthProviderDyn, AuthProviderFactoryDyn};
-use crate::compute::local_provider::LocalComputeProvider;
-use crate::compute::ComputeProvider;
+use crate::compute::{ComputeProvider, LocalComputeProvider, LocalProviderConfig};
 use crate::jwt::JwtKeys;
 use crate::models::{PendingDevice, ProviderId, RefreshRecord, Session};
 
@@ -111,7 +110,13 @@ impl AppState {
         let mut compute_providers = HashMap::<String, Arc<dyn ComputeProvider>>::new();
 
         // Initialize local provider using config path
-        let local_provider = Arc::new(LocalComputeProvider::new(config.noenv_flake_path.clone().into()));
+        let provider_config = LocalProviderConfig {
+            session_root: std::env::var("STEADYSTATE_SESSION_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".steadystate").join("sessions")),
+            flake_path: config.noenv_flake_path.clone().into(),
+        };
+        let local_provider = Arc::new(LocalComputeProvider::new(provider_config));
         compute_providers.insert(local_provider.id().to_string(), local_provider);
 
         // 3. Build State
