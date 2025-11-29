@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use anyhow::{Result, anyhow, Context};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 
 use crate::compute::{
     traits::{ComputeProvider, ProviderCapabilities, SessionHealth, RemoteExecutor},
@@ -132,9 +132,10 @@ impl LocalComputeProvider {
 
         // Setup SSH
         let authorized_keys = self.ssh_key_manager
-            .build_authorized_keys(
+            .build_authorized_keys_for_repo(
                 creator_login.as_deref(),
                 request.allowed_users.as_deref(),
+                Some(&request.repo_url),
                 github_token.as_deref(),
             )
             .await;
@@ -187,11 +188,12 @@ impl LocalComputeProvider {
         git.clone(&request.repo_url, &workspace.repo_path, Some(1), None).await?;
 
         let (creator_login, github_token) = self.extract_github_config(request);
-
+        // Setup SSH
         let authorized_keys = self.ssh_key_manager
-            .build_authorized_keys(
+            .build_authorized_keys_for_repo(
                 creator_login.as_deref(),
                 request.allowed_users.as_deref(),
+                Some(&request.repo_url),
                 github_token.as_deref(),
             )
             .await;
@@ -407,7 +409,7 @@ impl LocalComputeProvider {
 
     async fn launch_upterm(
         &self,
-        workspace: &WorkspaceInfo,
+        _workspace: &WorkspaceInfo,
         auth_keys_path: &Path,
         session_id: &str,
     ) -> Result<(u32, String)> {
@@ -426,7 +428,7 @@ impl LocalComputeProvider {
         // This is tricky with the generic RemoteExecutor if we don't have specialized support.
         // But exec_streaming returns stdout stream.
         
-        let (pid, stdout, _) = self.executor.exec_streaming(cmd, &args.iter().map(|s| *s).collect::<Vec<_>>()).await?;
+        let (pid, _stdout, _) = self.executor.exec_streaming(cmd, &args.iter().map(|s| *s).collect::<Vec<_>>()).await?;
         
         // We need to parse stdout for the invite
         // This logic is similar to capture_upterm_invite in local_provider.rs

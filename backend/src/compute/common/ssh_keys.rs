@@ -1,6 +1,7 @@
 use reqwest::Client;
 use std::collections::HashSet;
 use anyhow::{Result, anyhow, Context};
+use crate::compute::common::github::{self, RepoInfo};
 
 #[derive(Debug, Clone)]
 pub struct AuthorizedKey {
@@ -45,31 +46,85 @@ impl SshKeyManager {
         Ok(keys)
     }
     
-    /// Build authorized_keys entries for multiple users
-    pub async fn build_authorized_keys(
+    /// Build authorized_keys entries for a repository session
+    /// 
+    /// This fetches SSH keys for:
+    /// 1. The session creator
+    /// 2. Explicitly allowed users (if provided)
+    /// 3. All repository collaborators (if repo_url and token provided)
+    pub async fn build_authorized_keys_for_repo(
         &self,
         creator: Option<&str>,
         allowed_users: Option<&[String]>,
+        repo_url: Option<&str>,
         github_token: Option<&str>,
     ) -> Vec<AuthorizedKey> {
         let mut seen_keys = HashSet::new();
         let mut result = Vec::new();
-        
-        // Collect all usernames
         let mut usernames: Vec<String> = Vec::new();
         
+        // 1. Add creator
         if let Some(creator) = creator {
             usernames.push(creator.to_string());
         }
         
+        // 2. Add explicitly allowed users
         if let Some(users) = allowed_users {
             usernames.extend(users.iter().cloned());
         }
         
-        // Fetch keys for each user
+        // 3. Fetch repository collaborators
+        if let (Some(url), Some(token)) = (repo_url, github_token) {
+            match RepoInfo::from_url(url) {
+                Ok(repo_info) => {
+                    tracing::info!(
+                        "Fetching collaborators for {}/{}",
+                        repo_info.owner,
+                        repo_info.repo
+                    );
+                    
+                    match github::fetch_collaborators(
+                        &self.http_client,
+                        &repo_info.owner,
+                        &repo_info.repo,
+                        Some(token),
+                    ).await {
+                        Ok(collaborators) => {
+                            tracing::info!(
+                                "Found {} collaborators for {}/{}",
+                                collaborators.len(),
+                                repo_info.owner,
+                                repo_info.repo
+                            );
+                            for collab in collaborators {
+                                if !usernames.contains(&collab.login) {
+                                    usernames.push(collab.login);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch collaborators for {}/{}: {}",
+                                repo_info.owner,
+                                repo_info.repo,
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse repo URL '{}': {}", url, e);
+                }
+            }
+        }
+        
+        // 4. Fetch SSH keys for all users
+        tracing::info!("Fetching SSH keys for {} users: {:?}", usernames.len(), usernames);
+        
         for username in usernames {
             match self.fetch_github_keys(&username).await {
                 Ok(keys) => {
+                    tracing::debug!("Found {} keys for {}", keys.len(), username);
                     for key in keys {
                         if seen_keys.insert(key.clone()) {
                             result.push(AuthorizedKey {
@@ -85,17 +140,23 @@ impl SshKeyManager {
             }
         }
         
-        // Optionally fetch collaborators from GitHub API if token is provided
-        if let Some(token) = github_token {
-             // Logic to fetch collaborators would go here.
-             // For now, we'll skip implementing the full collaborator fetching logic 
-             // as it requires more complex API interactions (pagination, etc.)
-             // which can be migrated from local_provider.rs later or implemented here.
-             // The guide stubbed this out, so we will too for now.
-             tracing::debug!("GitHub token provided, but collaborator fetching not yet fully implemented in SshKeyManager");
-        }
+        tracing::info!(
+            "Built authorized_keys with {} keys for {} unique users",
+            result.len(),
+            result.iter().map(|k| &k.user).collect::<HashSet<_>>().len()
+        );
         
         result
+    }
+
+    /// Build authorized_keys entries for multiple users
+    pub async fn build_authorized_keys(
+        &self,
+        creator: Option<&str>,
+        allowed_users: Option<&[String]>,
+        github_token: Option<&str>,
+    ) -> Vec<AuthorizedKey> {
+        self.build_authorized_keys_for_repo(creator, allowed_users, None, github_token).await
     }
     
     /// Generate authorized_keys file content
