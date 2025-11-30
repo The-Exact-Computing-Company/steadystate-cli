@@ -257,40 +257,45 @@ steadystate dash "steadystate://collab/a1b2c3d4?ssh=..."
 ```
 
 ### Dashboard Interface
-
-```
-SteadyState Dashboard
-Session ID: a1b2c3d4
-User:       brodrigues (Connected)
---------------------------------------------------------------------------------
-Connected Users:
-  • brodrigues
-  • rap4all
-
-Recent Activity:
-  [14:32:05] brodrigues synced
-      - analysis.R 10:12
-      - data/housing.csv 1:50
-  [14:35:22] rap4all synced
-      - analysis.R 25:30
-  [14:38:01] brodrigues synced
-      - analysis.R 45:52
-
---------------------------------------------------------------------------------
-Status: Sync complete!
-
-Controls: [s] Sync  [p] Publish  [d] Diff  [q] Quit
-```
-
-### Dashboard Controls
-
-| Key | Action |
-|-----|--------|
-| `s` | Run `steadystate sync` - sync your changes with collaborators |
-| `p` | Run `steadystate publish` - push changes to GitHub |
-| `d` | Run `steadystate diff` - view your local changes |
-| `q` or `Esc` | Exit dashboard |
-| `Ctrl+C` | Exit dashboard |
+ 
+ ```
+ SteadyState Dashboard
+ Session ID: a1b2c3d4
+ Repository: housing
+ Join with:       steadystate join "steadystate://collab/a1b2c3d4?ssh=..."
+ To join with ssh: ssh steadystate@192.168.1.100 -p 2847
+ --------------------------------------------------------------------------------
+ User:       brodrigues (Connected)
+ --------------------------------------------------------------------------------
+ Connected Users:
+   • brodrigues
+   • rap4all
+ 
+ Recent Activity:
+   [14:32:05] brodrigues synced
+       - analysis.R 10:12
+       - data/housing.csv 1:50
+   [14:35:22] rap4all synced
+       - analysis.R 25:30
+   [14:38:01] brodrigues synced
+       - analysis.R 45:52
+ 
+ --------------------------------------------------------------------------------
+ Status: Sync complete!
+ 
+ Controls: [s] Sync  [p] Publish  [d] Diff  [c] Credit  [q] Quit
+ ```
+ 
+ ### Dashboard Controls
+ 
+ | Key | Action |
+ |-----|--------|
+ | `s` | Run `steadystate sync` - sync your changes with collaborators |
+ | `p` | Run `steadystate publish` - push changes to GitHub |
+ | `d` | Run `steadystate diff` - view your local changes |
+ | `c` | Run `steadystate credit` - view git blame for a file |
+ | `q` or `Esc` | Exit dashboard |
+ | `Ctrl+C` | Exit dashboard |
 
 ---
 
@@ -347,18 +352,22 @@ Output:
 ```
 
 ### Check Credit
-
-See who last modified specific lines in a file (git blame):
-
-```bash
-steadystate credit analysis.R
-```
-
-Output:
-```
-^abc123 (brodrigues 2023-10-27 14:32:05 +0200 10) data <- read.csv("housing.csv")
-e4f5g6h (rap4all    2023-10-27 14:35:22 +0200 25) data <- data[data$price < 1000000, ]
-```
+ 
+ See who last modified specific lines in a file (git blame):
+ 
+ ```bash
+ steadystate credit analysis.R
+ ```
+ 
+ The output is piped to `less` for easy scrolling. Press `q` to exit.
+ 
+ Output:
+ ```
+ ^abc123 (brodrigues 2023-10-27 14:32:05 +0200 10) data <- read.csv("housing.csv")
+ e4f5g6h (rap4all    2023-10-27 14:35:22 +0200 25) data <- data[data$price < 1000000, ]
+ ```
+ 
+ **Note:** Commits from `steadystate sync` are authored by the user who ran the sync, so credit is accurately attributed.
 
 ### Sync Changes
 

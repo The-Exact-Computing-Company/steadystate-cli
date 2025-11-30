@@ -40,6 +40,16 @@ When set, the merge engine will log detailed information about each file being m
 
 **Default:** Unset (disabled)
 
+## STEADYSTATE_CONFIG_DIR
+
+Override the directory where SteadyState stores configuration and session files.
+
+```
+export STEADYSTATE_CONFIG_DIR="/path/to/config"
+```
+
+**Default:** `~/.config/steadystate` (Linux), `~/Library/Application Support/steadystate` (macOS)
+
 # BACKEND CONFIGURATION
 
 ## Required Variables
@@ -136,6 +146,7 @@ Inside a collaboration session, the following variables are set automatically:
 | `STEADYSTATE_USERNAME` | GitHub username of connected user |
 | `USER_WORKSPACE` | Path to user's worktree |
 | `CANONICAL_REPO` | Path to canonical repository |
+| `REPO_NAME` | Name of the repository (used by dashboard) |
 
 # FILES
 

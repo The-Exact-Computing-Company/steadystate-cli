@@ -191,7 +191,21 @@ Opens an interactive TUI dashboard showing:
 - `s` - Run sync
 - `p` - Run publish
 - `d` - Show diff
+- `c` - Run credit (git blame)
 - `q` or `Esc` - Exit
+
+## steadystate credit
+
+Show line-by-line credit (git blame).
+
+```
+steadystate credit <FILE>
+```
+
+Displays `git blame` output for the specified file, piped to `less` for scrolling. This allows you to see exactly who modified which line.
+
+**Note:** Sync commits are authored by the user who ran the sync, ensuring accurate credit.
+
 
 # ENVIRONMENT VARIABLES
 
