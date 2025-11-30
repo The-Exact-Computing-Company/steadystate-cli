@@ -23,14 +23,20 @@ steadystate up --mode=collab https://github.com/username/repository
 | Option | Description |
 |--------|-------------|
 | `--mode=collab` | Enable collaboration mode (required for multi-user) |
-| `--branch=NAME` | Start from a specific branch (default: main) |
 | `--allow=user1,user2` | Restrict access to specific GitHub users |
 
 ### Example
 
 ```bash
-steadystate up --mode=collab --branch=feature-analysis https://github.com/b-rodrigues/housing
+steadystate up --mode=collab https://github.com/b-rodrigues/housing
 ```
+
+### Session Branch
+
+When you create a collaboration session, SteadyState automatically creates a new branch on the remote repository:
+`steadystate/collab/<session_id>`
+
+All work during the session happens on this branch. This ensures that your main branch remains clean until you decide to merge the changes (via a Pull Request).
 
 Output:
 

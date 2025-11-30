@@ -58,9 +58,6 @@ steadystate up [OPTIONS] <REPOSITORY>
 `--mode=<MODE>`
 :   Session mode. Use `collab` for collaboration mode. Default: `solo`
 
-`--branch=<NAME>`
-:   Branch to start from. Default: repository default branch
-
 `--allow=<USERS>`
 :   Comma-separated list of GitHub usernames allowed to join. Default: all repository collaborators
 
