@@ -1,0 +1,21 @@
+# SteadyState Documentation Navigation
+# Format: SECTION: title
+#         filename|Display Name
+#
+# To add a new page:
+# 1. Create docs/yourpage.md
+# 2. Add entry here under appropriate section
+# 3. Push to main branch
+
+SECTION: User Guide
+getting_started|Getting Started
+quickstart|Quick Start
+
+SECTION: Reference
+commands|Commands
+configuration|Configuration
+
+SECTION: Internals
+architecture|Architecture
+merge-engine|Merge Engine
+troubleshooting|Troubleshooting

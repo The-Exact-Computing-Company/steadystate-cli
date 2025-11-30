@@ -1,0 +1,202 @@
+# NAME
+
+**steadystate commands** - CLI command reference
+
+# AUTHENTICATION COMMANDS
+
+## steadystate login
+
+Authenticate with GitHub using the device flow.
+
+```
+steadystate login
+```
+
+Opens a device authorization flow. You will be prompted to visit github.com/login/device and enter a code. No browser redirect is required, making this suitable for headless servers and SSH sessions.
+
+**Exit Status:**
+- 0 on success
+- 1 on authentication failure or timeout
+
+## steadystate logout
+
+Remove local authentication tokens.
+
+```
+steadystate logout
+```
+
+Clears the stored JWT and refresh token. Does not revoke tokens on the server.
+
+## steadystate whoami
+
+Display the currently authenticated user.
+
+```
+steadystate whoami
+```
+
+**Output:** GitHub username of the authenticated user, or an error if not logged in.
+
+# SESSION COMMANDS
+
+## steadystate up
+
+Create a new collaboration session.
+
+```
+steadystate up [OPTIONS] <REPOSITORY>
+```
+
+**Arguments:**
+
+`<REPOSITORY>`
+:   GitHub repository URL (https or git@)
+
+**Options:**
+
+`--mode=<MODE>`
+:   Session mode. Use `collab` for collaboration mode. Default: `solo`
+
+`--branch=<NAME>`
+:   Branch to start from. Default: repository default branch
+
+`--allow=<USERS>`
+:   Comma-separated list of GitHub usernames allowed to join. Default: all repository collaborators
+
+**Examples:**
+
+```
+steadystate up --mode=collab https://github.com/user/repo
+steadystate up --mode=collab --branch=develop git@github.com:org/repo.git
+steadystate up --mode=collab --allow=alice,bob https://github.com/user/repo
+```
+
+## steadystate join
+
+Join an existing collaboration session.
+
+```
+steadystate join "<MAGIC_LINK>"
+```
+
+**Arguments:**
+
+`<MAGIC_LINK>`
+:   The magic link provided by the session host. Must be quoted to prevent shell interpretation.
+
+The magic link has the format:
+```
+steadystate://collab/<session_id>?ssh=<ssh_url>&host_key=<public_key>
+```
+
+**Example:**
+
+```
+steadystate join "steadystate://collab/abc123?ssh=ssh%3A%2F%2Fsteadystate%40192.168.1.100%3A2847&host_key=ssh-ed25519%20AAAA..."
+```
+
+## steadystate dashboard
+
+Open the session dashboard without joining.
+
+```
+steadystate dashboard "<MAGIC_LINK>"
+steadystate dash "<MAGIC_LINK>"
+```
+
+Opens a TUI dashboard showing connected users and sync activity. Use this to monitor a session without creating a worktree.
+
+**Aliases:** `dash`
+
+# COLLABORATION COMMANDS
+
+## steadystate sync
+
+Synchronize changes with collaborators.
+
+```
+steadystate sync
+```
+
+This command:
+
+1. Fetches changes from other collaborators
+2. Performs a 3-way merge (base, local, remote)
+3. Commits the merged result
+4. Pushes to the session repository
+5. Updates local worktree
+
+Run this command frequently to stay in sync with collaborators.
+
+**Exit Status:**
+- 0 on success
+- 1 on merge conflict or push failure (run sync again)
+
+## steadystate publish
+
+Push session changes to GitHub.
+
+```
+steadystate publish
+```
+
+Pushes the session branch to the original GitHub repository. After publishing, you can create a Pull Request on GitHub to merge changes into the main branch.
+
+## steadystate status
+
+Show local changes.
+
+```
+steadystate status
+```
+
+Displays files that have been modified, added, or deleted in your worktree compared to the last sync point.
+
+**Output format:**
+```
+On branch steadystate/abc123
+Changes not staged for commit:
+        modified:   file.txt
+        deleted:    old.txt
+
+Untracked files:
+        new.txt
+```
+
+## steadystate diff
+
+Show detailed diff of changes.
+
+```
+steadystate diff
+```
+
+Displays a unified diff of all changes in your worktree. Output is similar to `git diff`.
+
+## steadystate watch
+
+Display the session dashboard (inside session).
+
+```
+steadystate watch
+```
+
+Opens an interactive TUI dashboard showing:
+- Session information
+- Connected users
+- Recent sync activity with file changes
+
+**Keyboard controls:**
+- `s` - Run sync
+- `p` - Run publish
+- `d` - Show diff
+- `q` or `Esc` - Exit
+
+# ENVIRONMENT VARIABLES
+
+See **CONFIGURATION(5)** for environment variables that affect command behavior.
+
+# SEE ALSO
+
+**steadystate**(1), **git**(1)
