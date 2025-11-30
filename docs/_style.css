@@ -30,7 +30,11 @@
    Light Theme Variables Override
    (only active when checkbox is checked)
    ------------------------------ */
-#toggle-theme:checked ~ * {
+/* ------------------------------
+   Light Theme Variables Override
+   (only active when checkbox is checked)
+   ------------------------------ */
+#toggle-theme:checked ~ .layout {
     --bg: #ffffff;
     --bg-sidebar: #fafafa;
     --fg: #000000;
@@ -98,8 +102,7 @@ html, body {
 }
 
 body {
-    background: var(--bg);
-    color: var(--fg);
+    /* Background moved to .layout to support theme toggle */
     font-family: var(--font-mono);
     font-size: 14px;
     line-height: 1.6;
@@ -111,6 +114,8 @@ body {
 .layout {
     display: flex;
     min-height: 100vh;
+    background: var(--bg);
+    color: var(--fg);
 }
 
 /* ============================================================================
