@@ -673,11 +673,12 @@ async fn commit_changes(repo_path: &Path, _branch: &str, user: &str) -> Result<V
         changes = get_staged_changes(repo_path).await?;
 
         let msg = format!("sync: SteadyState session by {}", user);
+        let author = format!("{} <{}@steadystate.local>", user, user);
         
         let commit_status = Command::new("git")
             .arg("-C")
             .arg(repo_path)
-            .args(&["commit", "-m", &msg, "--author", "SteadyState Bot <bot@steadystate.dev>"])
+            .args(&["commit", "-m", &msg, "--author", &author])
             .status()
             .await?;
             
