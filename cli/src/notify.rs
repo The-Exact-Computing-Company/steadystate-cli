@@ -142,18 +142,20 @@ fn run_dashboard(stdout: &mut std::io::Stdout) -> Result<()> {
                             
                             if !filename.is_empty() {
                                 println!("Running credit on {}...", filename);
-                                let output = std::process::Command::new("steadystate")
-                                    .arg("credit")
-                                    .arg(filename)
+                                
+                                // Use sh -c to pipe to less for paging
+                                let status = std::process::Command::new("sh")
+                                    .arg("-c")
+                                    .arg(format!("steadystate credit {} | less", filename))
                                     .current_dir(path)
-                                    .output();
+                                    .status();
                                     
-                                match output {
-                                    Ok(o) => {
-                                        if o.status.success() {
+                                match status {
+                                    Ok(s) => {
+                                        if s.success() {
                                             last_status_msg = format!("Credit successful for {}!", filename);
                                         } else {
-                                            last_status_msg = format!("Credit failed for {}: {}", filename, String::from_utf8_lossy(&o.stderr));
+                                            last_status_msg = format!("Credit failed for {}", filename);
                                         }
                                     }
                                     Err(e) => {
@@ -208,46 +210,83 @@ fn draw_ui(
     worktree_path: &Option<PathBuf>,
     status_msg: &str,
 ) -> Result<()> {
+    use std::io::Write; // Add this line for `write!` macro
     execute!(stdout, cursor::MoveTo(0, 0), crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
     
     // Header
     execute!(stdout, SetForegroundColor(Color::Cyan))?;
-    println!("SteadyState Dashboard");
+    write!(stdout, "SteadyState Dashboard\r\n")?;
     execute!(stdout, ResetColor)?;
-    println!("Session ID: {}", session_id);
+    
+    // Read session info
+    let session_info_path = Path::new(repo_root).join("session-info.json");
+    let mut magic_link = None;
+    let mut ssh_url = None;
+    let mut repo_name = std::env::var("REPO_NAME").ok();
+
+    if session_info_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&session_info_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                magic_link = json.get("magic_link").and_then(|v| v.as_str()).map(|s| s.to_string());
+                ssh_url = json.get("ssh_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                if repo_name.is_none() {
+                    repo_name = json.get("repo_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                }
+            }
+        }
+    }
+
+    write!(stdout, "Session ID: {}\r\n", session_id)?;
+    if let Some(repo) = repo_name {
+        write!(stdout, "Repository: {}\r\n", repo)?;
+    }
+    if let Some(link) = magic_link {
+        write!(stdout, "Join with:       steadystate join \"{}\"\r\n", link)?;
+    }
+    if let Some(ssh) = ssh_url {
+        if let Ok(url) = url::Url::parse(&ssh) {
+             let user = url.username();
+             let host = url.host_str().unwrap_or("localhost");
+             let port = url.port().unwrap_or(22);
+             write!(stdout, "To join with ssh: ssh {}@{} -p {}\r\n", user, host, port)?;
+        } else {
+             write!(stdout, "To join with ssh: {}\r\n", ssh)?;
+        }
+    }
+    write!(stdout, "--------------------------------------------------------------------------------\r\n")?;
     
     if let Some(user) = current_user {
-        print!("User:       {}", user);
+        write!(stdout, "User:       {}", user)?;
         if worktree_path.is_some() {
             execute!(stdout, SetForegroundColor(Color::Green))?;
-            println!(" (Connected)");
+            write!(stdout, " (Connected)\r\n")?;
         } else {
             execute!(stdout, SetForegroundColor(Color::Yellow))?;
-            println!(" (Observer - No worktree)");
+            write!(stdout, " (Observer - No worktree)\r\n")?;
         }
         execute!(stdout, ResetColor)?;
     } else {
-        println!("User:       (Anonymous Observer)");
+        write!(stdout, "User:       (Anonymous Observer)\r\n")?;
     }
     
-    println!("--------------------------------------------------------------------------------");
+    write!(stdout, "--------------------------------------------------------------------------------\r\n")?;
 
     // Connected Users
-    println!("Connected Users:");
+    write!(stdout, "Connected Users:\r\n")?;
     if active_users_path.exists() {
         if let Ok(content) = std::fs::read_to_string(active_users_path) {
             let mut users: Vec<&str> = content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
             users.sort();
             users.dedup();
             for user in users {
-                println!("  • {}", user);
+                write!(stdout, "  • {}\r\n", user)?;
             }
         }
     }
-    println!();
+    write!(stdout, "\r\n")?;
 
     // Activity Log
-    println!("Recent Activity:");
+    write!(stdout, "Recent Activity:\r\n")?;
     if sync_log_path.exists() {
         let content = std::fs::read_to_string(sync_log_path).unwrap_or_default();
         let lines: Vec<&str> = content.lines().collect();
@@ -260,15 +299,15 @@ fn draw_ui(
                 if let (Some(ts), Some(user)) = (entry.get("timestamp").and_then(|v| v.as_u64()), entry.get("user").and_then(|v| v.as_str())) {
                     let dt: DateTime<Local> = Local.timestamp_opt(ts as i64, 0).single().unwrap_or_default();
                     execute!(stdout, SetForegroundColor(Color::Cyan))?;
-                    println!("  [{}] {} synced", dt.format("%H:%M:%S"), user);
+                    write!(stdout, "  [{}] {} synced\r\n", dt.format("%H:%M:%S"), user)?;
                     execute!(stdout, ResetColor)?;
                     
                     if let Some(changes) = entry.get("changes").and_then(|v| v.as_array()) {
                         for change in changes {
                             if let (Some(file), Some(lines)) = (change.get("file").and_then(|v| v.as_str()), change.get("lines").and_then(|v| v.as_str())) {
-                                execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
-                                println!("      - {} {}", file, lines);
-                                execute!(stdout, ResetColor)?;
+                                // DarkGrey is often invisible on dark themes. Use default color.
+                                execute!(stdout, ResetColor)?; 
+                                write!(stdout, "      - {} {}\r\n", file, lines)?;
                             }
                         }
                     }
@@ -279,12 +318,12 @@ fn draw_ui(
                 if parts.len() >= 2 {
                     if let Ok(ts) = parts[0].parse::<i64>() {
                         let dt: DateTime<Local> = Local.timestamp_opt(ts, 0).single().unwrap_or_default();
-                        println!("  [{}] {} synced", dt.format("%H:%M:%S"), parts[1]);
+                        write!(stdout, "  [{}] {} synced\r\n", dt.format("%H:%M:%S"), parts[1])?;
                     } else {
-                        println!("  {}", line);
+                        write!(stdout, "  {}\r\n", line)?;
                     }
                 } else {
-                    println!("  {}", line);
+                    write!(stdout, "  {}\r\n", line)?;
                 }
             }
         }
@@ -293,24 +332,24 @@ fn draw_ui(
     // Footer / Controls
     let (_, rows) = crossterm::terminal::size()?;
     execute!(stdout, cursor::MoveTo(0, rows - 4))?;
-    println!("--------------------------------------------------------------------------------");
+    write!(stdout, "--------------------------------------------------------------------------------\r\n")?;
     
     if !status_msg.is_empty() {
         execute!(stdout, SetForegroundColor(Color::Yellow))?;
-        println!("Status: {}", status_msg);
+        write!(stdout, "Status: {}\r\n", status_msg)?;
         execute!(stdout, ResetColor)?;
     } else {
-        println!();
+        write!(stdout, "\r\n")?;
     }
     
     execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
-    print!("Controls: ");
+    write!(stdout, "Controls: ")?;
     execute!(stdout, ResetColor)?;
     
     if worktree_path.is_some() {
-        print!("[s] Sync  [p] Publish  [d] Diff  ");
+        write!(stdout, "[s] Sync  [p] Publish  [d] Diff  [c] Credit  ")?;
     }
-    println!("[q] Quit");
+    write!(stdout, "[q] Quit\r\n")?;
 
     Ok(())
 }

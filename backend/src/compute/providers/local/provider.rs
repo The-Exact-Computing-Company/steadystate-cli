@@ -161,10 +161,17 @@ impl LocalComputeProvider {
         let magic_link = format!("steadystate://collab/{}?ssh={}&host_key={}", 
                 session_id, urlencoding::encode(&invite), urlencoding::encode(&host_key));
 
+        // Extract repo name for dashboard
+        let repo_name = request.repo_url.split('/').last()
+            .map(|s| s.trim_end_matches(".git"))
+            .unwrap_or("repo")
+            .to_string();
+
         // Write session info for dashboard
         let session_info = serde_json::json!({
             "magic_link": magic_link,
-            "ssh_url": invite
+            "ssh_url": invite,
+            "repo_name": repo_name
         });
         let info_path = workspace.root.join("session-info.json");
         let info_content = serde_json::to_string_pretty(&session_info)?;
