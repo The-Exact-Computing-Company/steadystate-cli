@@ -11,7 +11,7 @@ SECTION: User Guide
 hosting-pair-programming|Pair Programming
 hosting-collaborative-session|Collaborative Session
 self-hosting|Self-Hosting
-quickstart|Quick Start
+
 SECTION: Reference
 commands|Commands
 configuration|Configuration
