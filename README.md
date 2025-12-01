@@ -39,7 +39,7 @@ Each session:
 ### 3. Collaborative Access
 
 Each session exposes a multi-user SSH endpoint through an embedded collaboration
-layer (using [Upterm](https://upterm.dev/)). This allows:
+layer (using `tmux`). This allows:
 
 * Pair programming
 * Live debugging
@@ -108,7 +108,7 @@ SSH is the backbone. Bring your own editor, or use `ne`.
 SteadyState supports two distinct modes for collaboration:
 
 #### 1. Pair Programming (`--mode=pair`)
-*   **Powered by Upterm**: Creates a secure SSH tunnel to the host's terminal.
+*   **Powered by Tmux**: Creates a shared terminal session.
 *   **Shared Terminal**: All users share the same terminal session and file system state.
 *   **Ideal for**: Real-time pair programming, debugging, and teaching.
 

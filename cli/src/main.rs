@@ -241,7 +241,7 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
         None => {
             eprintln!("Error: --mode flag is required.");
             eprintln!("Valid options:");
-            eprintln!("  --mode=pair    Pair programming mode (Upterm)");
+            eprintln!("  --mode=pair    Pair programming mode (Tmux)");
             eprintln!("  --mode=collab  Collaboration mode (SSH)");
             return Ok(());
         }
@@ -250,7 +250,7 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
     if mode_val != "pair" && mode_val != "collab" {
         eprintln!("Error: Invalid --mode option: {}", mode_val);
         eprintln!("Valid options:");
-        eprintln!("  --mode=pair    Pair programming mode (Upterm)");
+        eprintln!("  --mode=pair    Pair programming mode (Tmux)");
         eprintln!("  --mode=collab  Collaboration mode (SSH)");
         return Ok(());
     }

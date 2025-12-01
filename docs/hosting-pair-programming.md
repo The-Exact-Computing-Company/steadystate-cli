@@ -6,7 +6,7 @@ SteadyState's **Pair Programming Mode** (`--mode=pair`) creates a shared termina
 
 - You must be logged in (`steadystate login`).
 - You must have a running SteadyState backend.
-- `upterm` must be installed on the backend server (SteadyState uses `upterm` for this mode).
+- `tmux` must be installed on the backend server (SteadyState uses `tmux` for this mode).
 
 ## Creating a Session
 

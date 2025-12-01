@@ -72,7 +72,7 @@ An implementation of the `ComputeProvider` trait that runs development sessions 
 - **`LocalComputeProvider::new()`**: Creates a new instance of the local compute provider.
 - **`LocalComputeProvider::start_session()`**: Orchestrates session startup, delegating to `setup_collab_mode` or `setup_pair_mode`.
 - **`LocalComputeProvider::setup_collab_mode()`**: Initializes a shared workspace for asynchronous collaboration.
-- **`LocalComputeProvider::setup_pair_mode()`**: Initializes a pair programming session using `upterm`.
+- **`LocalComputeProvider::setup_pair_mode()`**: Initializes a pair programming session using `tmux`.
 - **`LocalComputeProvider::install_scripts()`**: Copies the `steadystate` binary and installs helper scripts (`steadystate-sync`, `steadystate-wrapper`) into the session.
 - **`LocalComputeProvider::launch_sshd()`**: Configures and starts a dedicated `sshd` instance for the session.
     - **SSH User Handling**: Uses `STEADYSTATE_SSH_USER` env var, falls back to `USER` env var, or defaults to "steadystate".
