@@ -257,3 +257,51 @@ echo ""
 echo "✓ Sync complete!"
 "#)
 }
+
+pub fn pair_wrapper_script() -> ScriptTemplate {
+    ScriptTemplate::new(r#"#!/usr/bin/env bash
+# Pair mode wrapper - attaches all users to shared tmux session
+
+set -e
+
+SESSION_ROOT="{{session_root}}"
+SESSION_ID="{{session_id}}"
+REPO_PATH="$SESSION_ROOT/repo"
+TMUX_SESSION="pair-${SESSION_ID:0:8}"  # Use first 8 chars of session ID
+ENVIRONMENT="{{environment}}"
+FLAKE_PATH="{{flake_path}}"
+
+# Log activity
+echo "$(date -Iseconds) pair-connect user=$1" >> "$SESSION_ROOT/activity-log"
+
+cd "$REPO_PATH" || exit 1
+
+# Function to start/attach tmux with optional nix environment
+start_tmux() {
+    # -A: attach if exists, create if not
+    # -s: session name
+    exec tmux new-session -A -s "$TMUX_SESSION" "$@"
+}
+
+case "$ENVIRONMENT" in
+    noenv|python)
+        # Wrap tmux in nix develop
+        exec nix develop "$FLAKE_PATH" --command tmux new-session -A -s "$TMUX_SESSION"
+        ;;
+    flake)
+        exec nix develop "$REPO_PATH" --command tmux new-session -A -s "$TMUX_SESSION"
+        ;;
+    legacy-nix)
+        if [ -f "$REPO_PATH/shell.nix" ]; then
+            exec nix-shell "$REPO_PATH/shell.nix" --command "tmux new-session -A -s $TMUX_SESSION"
+        else
+            exec nix-shell "$REPO_PATH/default.nix" --command "tmux new-session -A -s $TMUX_SESSION"
+        fi
+        ;;
+    *)
+        # No environment, just tmux
+        start_tmux
+        ;;
+esac
+"#)
+}

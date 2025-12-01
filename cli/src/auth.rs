@@ -24,8 +24,9 @@ struct PollResponse {
     status: Option<String>,
     jwt: Option<String>,
     refresh_token: Option<String>,
-    login: Option<String>,
-    error: Option<String>,
+    pub login: Option<String>,
+    pub provider_access_token: Option<String>,
+    pub error: Option<String>,
 }
 
 pub type UpResponse = SessionInfo;
@@ -114,6 +115,10 @@ pub async fn device_login(client: &Client, provider: &str) -> Result<()> {
                             let login = out.login.context("no login returned")?;
 
                             store_refresh_token(&login, &refresh, None).await?;
+
+                            if let Some(token) = out.provider_access_token {
+                                store_access_token(&login, &token, None).await?;
+                            }
 
                             let session = Session::new(login.clone(), jwt.clone());
                             write_session(&session, None).await?;
@@ -443,6 +448,137 @@ pub async fn delete_refresh_token(username: &str, override_dir: Option<&PathBuf>
     let path = get_fallback_token_path(override_dir).await?;
     if path.exists() {
         tokio::fs::remove_file(path).await.context("failed to delete fallback token file")?;
+    }
+
+    Ok(())
+}
+
+/// Helper to get the fallback file path for the access token
+async fn get_access_token_path(override_dir: Option<&PathBuf>) -> Result<PathBuf> {
+    let base_dir = crate::session::get_cfg_dir(override_dir).await?;
+    Ok(base_dir.join("provider_token"))
+}
+
+/// Stores access token in the OS keychain (with timeout) or fallback file.
+pub async fn store_access_token(username: &str, token: &str, override_dir: Option<&PathBuf>) -> Result<()> {
+    if token.is_empty() {
+        return Err(anyhow!("access token cannot be empty"));
+    }
+    
+    // Check for mock keyring first
+    if let Some(path) = get_mock_keyring_path(&format!("{}_access", username)) {
+        return std::fs::write(path, token).context("failed to write mock keyring");
+    }
+
+    let use_keyring = std::env::var("STEADYSTATE_NO_KEYRING").is_err();
+
+    if use_keyring {
+        let username = format!("{}_access", username);
+        let token_val = token.to_string();
+
+        // Try keyring with timeout
+        let keyring_result = time::timeout(Duration::from_millis(KEYRING_TIMEOUT_MS), tokio::task::spawn_blocking(move || {
+            let entry = Entry::new(SERVICE_NAME, &username).context("keyring entry creation failed")?;
+            entry.set_password(&token_val).context("keyring set_password failed")
+        })).await;
+
+        match keyring_result {
+            Ok(Ok(Ok(_))) => return Ok(()),
+            Ok(Ok(Err(e))) => warn!("Keyring error: {}. Falling back to file storage.", e),
+            Ok(Err(e)) => warn!("Keyring task join error: {}. Falling back to file storage.", e),
+            Err(_) => warn!("Keyring operation timed out. Falling back to file storage."),
+        }
+    }
+
+    // Fallback: Write to file
+    let path = get_access_token_path(override_dir).await?;
+    tokio::fs::write(&path, token).await.context("failed to write access token file")?;
+    
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await {
+            warn!("Failed to set strict permissions on token file: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Retrieves access token from keychain (with timeout) or fallback file.
+pub async fn get_access_token(username: &str, override_dir: Option<&PathBuf>) -> Result<Option<String>> {
+    // Check for mock keyring first
+    if let Some(path) = get_mock_keyring_path(&format!("{}_access", username)) {
+        if path.exists() {
+            return std::fs::read_to_string(path).map(Some).context("failed to read mock keyring");
+        } else {
+            return Ok(None);
+        }
+    }
+
+    let use_keyring = std::env::var("STEADYSTATE_NO_KEYRING").is_err();
+
+    if use_keyring {
+        let username = format!("{}_access", username);
+
+        // Try keyring with timeout
+        let keyring_result = time::timeout(Duration::from_millis(KEYRING_TIMEOUT_MS), tokio::task::spawn_blocking(move || {
+            let entry = Entry::new(SERVICE_NAME, &username).context("keyring entry creation failed")?;
+            match entry.get_password() {
+                Ok(tok) => Ok(Some(tok)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(e).context("keyring get_password failed"),
+            }
+        })).await;
+
+        match keyring_result {
+            Ok(Ok(Ok(Some(token)))) => return Ok(Some(token)),
+            Ok(Ok(Ok(None))) => {}, 
+            Ok(Ok(Err(e))) => warn!("Keyring error: {}. Checking fallback file.", e),
+            Ok(Err(e)) => warn!("Keyring task join error: {}. Checking fallback file.", e),
+            Err(_) => warn!("Keyring operation timed out. Checking fallback file."),
+        }
+    }
+
+    // Fallback: Read from file
+    let path = get_access_token_path(override_dir).await?;
+    if path.exists() {
+        let token = tokio::fs::read_to_string(path).await.context("failed to read access token file")?;
+        if !token.trim().is_empty() {
+             return Ok(Some(token));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Deletes access token from keychain (with timeout) and fallback file.
+pub async fn delete_access_token(username: &str, override_dir: Option<&PathBuf>) -> Result<()> {
+    // Check for mock keyring first
+    if let Some(path) = get_mock_keyring_path(&format!("{}_access", username)) {
+        if path.exists() {
+            std::fs::remove_file(path).context("failed to delete mock keyring")?;
+        }
+        return Ok(());
+    }
+
+    let use_keyring = std::env::var("STEADYSTATE_NO_KEYRING").is_err();
+
+    if use_keyring {
+        let username = format!("{}_access", username);
+
+        // Try keyring with timeout
+        let _ = time::timeout(Duration::from_millis(KEYRING_TIMEOUT_MS), tokio::task::spawn_blocking(move || {
+            if let Ok(entry) = Entry::new(SERVICE_NAME, &username) {
+                let _ = entry.delete_credential();
+            }
+        })).await;
+    }
+
+    // Always try to delete fallback file too
+    let path = get_access_token_path(override_dir).await?;
+    if path.exists() {
+        tokio::fs::remove_file(path).await.context("failed to delete access token file")?;
     }
 
     Ok(())

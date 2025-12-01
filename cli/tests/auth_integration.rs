@@ -17,6 +17,7 @@ fn up_refreshes_proactively_when_jwt_expired() {
     let mut harness = TestHarness::new(script);
     harness.create_expired_session();
     harness.set_keyring_password("tester", "refresh-token-abc");
+    harness.set_keyring_password("tester_access", "access-token-123");
 
     let (out, reqs) = harness.run_cli_and_assert_success(&["up", "https://github.com/example/repo", "--env=noenv", "--mode=pair"]);
 
@@ -35,6 +36,7 @@ fn up_errors_gracefully_if_server_returns_401() {
     ];
     let mut harness = TestHarness::new(script);
     harness.create_future_session(); // Create a session with a non-expired JWT
+    harness.set_keyring_password("tester_access", "access-token-123");
 
     // Run the CLI but don't assert success
     let output = harness.run_cli(&["up", "https://github.com/example/repo", "--env=noenv", "--mode=pair"]);

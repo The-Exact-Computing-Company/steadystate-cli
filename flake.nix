@@ -1,20 +1,17 @@
 {
   description = "SteadyState dev environment";
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
     treemerge.url = "github:b-rodrigues/treemerge";
-    upterm-pkgs.url = "github:b-rodrigues/nixpkgs/update_upterm";
   };
-  outputs = { self, nixpkgs, flake-utils, treemerge, upterm-pkgs }:
+  outputs = { self, nixpkgs, flake-utils, treemerge }:
     flake-utils.lib.eachDefaultSystem (system:
     let
       pkgs = import nixpkgs { inherit system; };
       isCI = builtins.getEnv "CI" == "true" || builtins.getEnv "CI" == "1";
       isDarwin = pkgs.stdenv.isDarwin;
       
-      upkgs = import upterm-pkgs {inherit system;};
-      upterm = upkgs.upterm;
       workspaceSrc = pkgs.lib.cleanSource ./.;
       # Build entire Cargo workspace once
       workspaceDrv = pkgs.rustPlatform.buildRustPackage {
@@ -69,8 +66,8 @@
 
           backend
           cli
+          pkgs.tmux
           treemerge.packages.${system}.default
-          upterm
         ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.iproute2 ]
           ++ pkgs.lib.optionals (!isCI) [ pkgs.gemini-cli ];
         shellHook = ''

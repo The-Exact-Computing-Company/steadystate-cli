@@ -46,12 +46,43 @@ impl SshKeyManager {
         Ok(keys)
     }
     
+    /// Fetch local SSH public keys from ~/.ssh/*.pub
+    pub async fn fetch_local_keys(&self) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        
+        if let Some(home_dir) = dirs::home_dir() {
+            let ssh_dir = home_dir.join(".ssh");
+            if ssh_dir.exists() {
+                if let Ok(mut entries) = tokio::fs::read_dir(ssh_dir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        if let Some(extension) = path.extension() {
+                            if extension == "pub" {
+                                if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                                    for line in content.lines() {
+                                        let line = line.trim();
+                                        if !line.is_empty() && !line.starts_with('#') {
+                                            keys.push(line.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(keys)
+    }
+
     /// Build authorized_keys entries for a repository session
     /// 
     /// This fetches SSH keys for:
     /// 1. The session creator
     /// 2. Explicitly allowed users (if provided)
     /// 3. All repository collaborators (if repo_url and token provided)
+    /// 4. Local SSH keys of the user running the backend
     pub async fn build_authorized_keys_for_repo(
         &self,
         creator: Option<&str>,
@@ -153,11 +184,28 @@ impl SshKeyManager {
                 }
             }
         }
+
+        // 5. Add local SSH keys
+        match self.fetch_local_keys().await {
+            Ok(local_keys) => {
+                tracing::info!("Found {} local SSH keys", local_keys.len());
+                for key in local_keys {
+                    if seen_keys.insert(key.clone()) {
+                        result.push(AuthorizedKey {
+                            user: "local-user".to_string(),
+                            key,
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch local SSH keys: {}", e);
+            }
+        }
         
         tracing::info!(
-            "Built authorized_keys with {} keys for {} unique users",
-            result.len(),
-            result.iter().map(|k| &k.user).collect::<HashSet<_>>().len()
+            "Built authorized_keys with {} keys",
+            result.len()
         );
         
         result

@@ -54,6 +54,7 @@ pub struct PollOut {
     pub jwt: Option<String>,
     pub refresh_token: Option<String>,
     pub login: Option<String>,
+    pub provider_access_token: Option<String>,
     pub error: Option<String>,
 }
 

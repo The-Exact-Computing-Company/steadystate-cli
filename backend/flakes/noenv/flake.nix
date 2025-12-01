@@ -2,7 +2,7 @@
   description = "SteadyState --noenv environment";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
     treemerge.url = "github:b-rodrigues/treemerge";
   };
@@ -17,10 +17,11 @@
         name = "steadystate-noenv";
 
         buildInputs = [
-          pkgs.upterm
+          pkgs.git
+          pkgs.nano
           pkgs.ne
           pkgs.neovim
-          pkgs.git
+          pkgs.tmux
           treemerge.packages.${system}.default
         ];
 
@@ -31,7 +32,7 @@
 
         shellHook = ''
           echo "SteadyState --noenv environment activated."
-          echo "You have access to following tools: upterm, ne, neovim, git, teremerge."
+          echo "You have access to following tools: nano, ne, neovim, git, treemerge."
         '';
       };
     });

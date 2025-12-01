@@ -85,6 +85,7 @@ fn up_prints_human_output_on_success() {
     let script = vec![MockResponse::Custom(response)];
     let mut harness = TestHarness::new(script);
     harness.create_future_session();
+    harness.set_keyring_password("tester_access", "access-token-123");
 
     let (output, reqs) = harness.run_cli_and_assert_success(&["up", "https://example.com/repo.git", "--env=noenv", "--mode=pair"]);
     
@@ -94,7 +95,9 @@ fn up_prints_human_output_on_success() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("✅ Session created: session-123"));
-    assert!(stdout.contains("SSH: ssh://example.com"));
+    assert!(stdout.contains("SteadyState Pair Programming Session"));
+    assert!(stdout.contains("Session ID: session-123"));
+    assert!(stdout.contains("To join with ssh: ssh://example.com"));
 }
 
 #[test]
@@ -103,6 +106,7 @@ fn up_prints_json_on_success() {
     let script = vec![MockResponse::Custom(response)];
     let mut harness = TestHarness::new(script);
     harness.create_future_session();
+    harness.set_keyring_password("tester_access", "access-token-123");
 
     let (output, reqs) = harness.run_cli_and_assert_success(&["up", "https://example.com/repo.git", "--env=noenv", "--json", "--mode=pair"]);
 

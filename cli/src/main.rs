@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 
 use auth::{
     UpResponse, delete_refresh_token, device_login, get_refresh_token, perform_refresh,
-    request_with_auth,
+    request_with_auth, get_access_token,
 };
 use config::{BACKEND_URL, CLI_VERSION, HTTP_TIMEOUT_SECS, USER_AGENT};
 use session::{read_session, remove_session};
@@ -255,12 +255,29 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
         return Ok(());
     }
 
+    // Get credentials to send with request
+    let session = read_session(None).await.context(
+        "Not logged in. Please run 'steadystate login' first."
+    )?;
+    
+    let access_token = get_access_token(&session.login, None).await?
+        .ok_or_else(|| anyhow::anyhow!(
+            "No access token found for {}. Please run 'steadystate login' again.",
+            session.login
+        ))?;
+
     let payload = serde_json::json!({
         "repo_url": repo,
         "allowed_users": if allow.is_empty() { None } else { Some(allow.clone()) },
         "public": public,
         "environment": env_val,
-        "mode": mode_val
+        "mode": mode_val,
+        "provider_config": {
+            "github": {
+                "login": session.login,
+                "access_token": access_token
+            }
+        }
     });
 
     let resp: UpResponse = request_with_auth(
@@ -311,10 +328,23 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                         let final_magic_link = status.magic_link; // Update magic link from status
                         
                         if let Some(endpoint) = &final_endpoint {
-                            println!("✅ Session ready!");
-                            println!("SSH: {}", endpoint);
-                            if let Some(link) = &final_magic_link {
-                                println!("Magic Link: {}", link);
+                            if mode_val == "pair" {
+                                println!("✅ Session ready!");
+                                println!("");
+                                println!("SteadyState Pair Programming Session");
+                                println!("Session ID: {}", resp.id);
+                                let repo_name = repo.split('/').last().unwrap_or(&repo).trim_end_matches(".git");
+                                println!("Repository: {}", repo_name);
+                                if let Some(link) = &final_magic_link {
+                                    println!("Join with:       steadystate join \"{}\"", link);
+                                }
+                                println!("To join with ssh: {}", endpoint);
+                            } else {
+                                println!("✅ Session ready!");
+                                println!("SSH: {}", endpoint);
+                                if let Some(link) = &final_magic_link {
+                                    println!("Magic Link: {}", link);
+                                }
                             }
                         } else {
                             println!("⚠️  Session is running but no endpoint available");
@@ -342,10 +372,23 @@ async fn up(client: &Client, repo: String, json: bool, allow: Vec<String>, publi
                 }
             }
         } else if let Some(endpoint) = &resp.endpoint {
-            println!("✅ Session ready!");
-            println!("SSH: {}", endpoint);
-            if let Some(link) = &resp.magic_link { // Print initial magic link if available
-                println!("Magic Link: {}", link);
+            if mode_val == "pair" {
+                println!("✅ Session ready!");
+                println!("");
+                println!("SteadyState Pair Programming Session");
+                println!("Session ID: {}", resp.id);
+                let repo_name = repo.split('/').last().unwrap_or(&repo).trim_end_matches(".git");
+                println!("Repository: {}", repo_name);
+                if let Some(link) = &resp.magic_link {
+                    println!("Join with:       steadystate join \"{}\"", link);
+                }
+                println!("To join with ssh: {}", endpoint);
+            } else {
+                println!("✅ Session ready!");
+                println!("SSH: {}", endpoint);
+                if let Some(link) = &resp.magic_link { // Print initial magic link if available
+                    println!("Magic Link: {}", link);
+                }
             }
         }
 
@@ -415,59 +458,26 @@ async fn join(url_str: String) -> Result<()> {
         let mode = url.host_str().ok_or_else(|| anyhow::anyhow!("Invalid magic link: missing mode"))?;
         
         match mode {
-            "pair" => {
-                // Extract upterm param
-                let mut pairs = url.query_pairs();
-                let upterm_url = pairs
-                    .find(|(key, _)| key == "upterm")
-                    .map(|(_, val)| val.to_string())
-                    .ok_or_else(|| anyhow::anyhow!("Invalid pair link: missing 'upterm' parameter"))?;
-                
-                println!("Joining pair session...");
-                println!("Connecting to: {}", upterm_url);
-                
-                // Execute ssh
-                let up_url = Url::parse(&upterm_url).context("Failed to parse upterm URL")?;
-                let host = up_url.host_str().ok_or_else(|| anyhow::anyhow!("Missing host in upterm URL"))?;
-                let port = up_url.port().unwrap_or(22);
-                let user = up_url.username();
-                
-                let mut args = vec![
-                    "-p".to_string(),
-                    port.to_string(),
-                    "-o".to_string(),
-                    "StrictHostKeyChecking=no".to_string(), // For ephemeral hosts
-                    "-o".to_string(),
-                    "UserKnownHostsFile=/dev/null".to_string(),
-                    "-t".to_string(), // Force PTY
-                ];
-                
-                if !user.is_empty() {
-                    args.push(format!("{}@{}", user, host));
-                } else {
-                    args.push(host.to_string());
-                }
-                
-                use std::os::unix::process::CommandExt;
-                let err = std::process::Command::new("ssh")
-                    .args(&args)
-                    .exec();
-                    
-                return Err(anyhow::anyhow!("Failed to execute ssh: {}", err));
-            }
-            "collab" => {
-                // Extract ssh param
+            "pair" | "collab" => {
+                // Both modes now use SSH!
                 let mut pairs = url.query_pairs();
                 let ssh_url = pairs
                     .find(|(key, _)| key == "ssh")
                     .map(|(_, val)| val.to_string())
-                    .ok_or_else(|| anyhow::anyhow!("Invalid collab link: missing 'ssh' parameter"))?;
+                    .or_else(|| {
+                        // Backward compat for old pair links (though they won't work with new backend)
+                        pairs = url.query_pairs();
+                        pairs.find(|(key, _)| key == "upterm").map(|(_, val)| val.to_string())
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("Invalid link: missing 'ssh' parameter"))?;
                 
+                // Reset iterator for host_key
+                let mut pairs = url.query_pairs();
                 let host_key = pairs
                     .find(|(key, _)| key == "host_key")
                     .map(|(_, val)| val.to_string());
                 
-                println!("Joining collaboration session...");
+                println!("Joining {} session...", mode);
                 println!("Connecting to: {}", ssh_url);
                 
                 // Execute ssh
