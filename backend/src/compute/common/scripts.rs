@@ -32,6 +32,7 @@ export PATH="$REPO_ROOT/bin:$PATH"
 ACTIVE_USERS_FILE="$REPO_ROOT/active-users"
 ACTIVITY_LOG="$REPO_ROOT/activity-log"
 SYNC_LOG="$REPO_ROOT/sync-log"
+LOG_FILE="$REPO_ROOT/setup-$USER_ID.log"
 export ACTIVITY_LOG
 export SYNC_LOG
 export SESSION_ROOT="$REPO_ROOT"
@@ -51,14 +52,47 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Create worktree if not exists
+# ============================================================================
+# PROGRESS DISPLAY HELPERS
+# ============================================================================
+
+# Clear current line and print message
+print_status() {
+    printf "\r\033[K%s" "$1"
+}
+
+print_done() {
+    printf "\r\033[K✅ %s\n" "$1"
+}
+
+print_progress() {
+    printf "\r\033[K⏳ %s" "$1"
+}
+
+print_error() {
+    printf "\r\033[K❌ %s\n" "$1"
+}
+
+# ============================================================================
+# WORKSPACE SETUP (with suppressed output)
+# ============================================================================
+
 WORKTREE="$REPO_ROOT/worktrees/$USER_ID"
+
 if [ ! -d "$WORKTREE" ]; then
-    echo "Creating workspace for $USER_ID..."
+    print_progress "Cloning repository..."
+    
     mkdir -p "$REPO_ROOT/worktrees"
-    git clone --branch {{branch_name}} "$REPO_ROOT/canonical" "$WORKTREE"
+    
+    # Clone with suppressed output, log errors
+    if ! git clone --quiet --branch {{branch_name}} "$REPO_ROOT/canonical" "$WORKTREE" >> "$LOG_FILE" 2>&1; then
+        print_error "Failed to clone repository"
+        echo "See $LOG_FILE for details"
+        exit 1
+    fi
+    
     cd "$WORKTREE"
-    git remote rename origin canonical
+    git remote rename origin canonical >> "$LOG_FILE" 2>&1
     git config user.name "$USER_ID"
     git config user.email "$USER_ID@steadystate.local"
 
@@ -66,6 +100,8 @@ if [ ! -d "$WORKTREE" ]; then
     mkdir -p .worktree
     HEAD_COMMIT=$(git rev-parse HEAD)
     echo "{\"session_branch\": \"{{branch_name}}\", \"last_synced_commit\": \"$HEAD_COMMIT\"}" > .worktree/steadystate.json
+    
+    print_done "Repository cloned"
 fi
 
 export HOME="$WORKTREE"
@@ -74,23 +110,98 @@ export CANONICAL_REPO="$REPO_ROOT/canonical"
 
 cd "$WORKTREE" || exit 1
 
-# Welcome message
-cat << 'WELCOME'
-╔════════════════════════════════════════════════════════════╗
-║         Welcome to SteadyState Collaboration Mode          ║
-╚════════════════════════════════════════════════════════════╝
+# ============================================================================
+# ENVIRONMENT ACTIVATION (with suppressed output)
+# ============================================================================
 
-Commands:
-  steadystate sync      - Sync your changes
-  steadystate diff      - Show changes
-  steadystate status    - Check status
+run_in_env() {
+    # This function runs a command inside the nix environment
+    # Used after environment is built
+    case "{{environment}}" in
+        noenv|python)
+            nix develop "{{flake_path}}" --command "$@"
+            ;;
+        flake)
+            if [ -f "$WORKTREE/flake.nix" ]; then
+                nix develop "$WORKTREE" --command "$@"
+            else
+                "$@"
+            fi
+            ;;
+        legacy-nix)
+            if [ -f "$WORKTREE/shell.nix" ]; then
+                nix-shell "$WORKTREE/shell.nix" --command "$*"
+            elif [ -f "$WORKTREE/default.nix" ]; then
+                nix-shell "$WORKTREE/default.nix" --command "$*"
+            else
+                "$@"
+            fi
+            ;;
+        *)
+            "$@"
+            ;;
+    esac
+}
 
-WELCOME
+# Build environment if needed (suppress output)
+case "{{environment}}" in
+    noenv|python)
+        print_progress "Building environment..."
+        
+        # Build the environment silently, capturing output
+        if ! nix develop "{{flake_path}}" --command true >> "$LOG_FILE" 2>&1; then
+            print_error "Failed to build environment"
+            echo "See $LOG_FILE for details"
+            echo ""
+            echo "You can try manually with: nix develop {{flake_path}}"
+            exit 1
+        fi
+        
+        print_done "Environment ready"
+        ;;
+    flake)
+        if [ -f "$WORKTREE/flake.nix" ]; then
+            print_progress "Building environment..."
+            
+            if ! nix develop "$WORKTREE" --command true >> "$LOG_FILE" 2>&1; then
+                print_error "Failed to build environment"
+                echo "See $LOG_FILE for details"
+                exit 1
+            fi
+            
+            print_done "Environment ready"
+        fi
+        ;;
+    legacy-nix)
+        if [ -f "$WORKTREE/shell.nix" ] || [ -f "$WORKTREE/default.nix" ]; then
+            print_progress "Building environment..."
+            
+            NIX_FILE="$WORKTREE/shell.nix"
+            [ -f "$NIX_FILE" ] || NIX_FILE="$WORKTREE/default.nix"
+            
+            if ! nix-shell "$NIX_FILE" --command true >> "$LOG_FILE" 2>&1; then
+                print_error "Failed to build environment"
+                echo "See $LOG_FILE for details"
+                exit 1
+            fi
+            
+            print_done "Environment ready"
+        fi
+        ;;
+esac
+
+echo ""
+
+# ============================================================================
+# LAUNCH DASHBOARD OR COMMAND
+# ============================================================================
 
 if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
-    exec bash -c "$SSH_ORIGINAL_COMMAND"
+    # User ran a specific command (e.g., ssh user@host "some command")
+    run_in_env bash -c "$SSH_ORIGINAL_COMMAND"
 else
-    exec bash -l
+    # Interactive session - launch dashboard
+    run_in_env steadystate dash
 fi
 "#)
 }
@@ -144,5 +255,53 @@ fi
 log_activity "synced"
 echo ""
 echo "✓ Sync complete!"
+"#)
+}
+
+pub fn pair_wrapper_script() -> ScriptTemplate {
+    ScriptTemplate::new(r#"#!/usr/bin/env bash
+# Pair mode wrapper - attaches all users to shared tmux session
+
+set -e
+
+SESSION_ROOT="{{session_root}}"
+SESSION_ID="{{session_id}}"
+REPO_PATH="$SESSION_ROOT/repo"
+TMUX_SESSION="pair-${SESSION_ID:0:8}"  # Use first 8 chars of session ID
+ENVIRONMENT="{{environment}}"
+FLAKE_PATH="{{flake_path}}"
+
+# Log activity
+echo "$(date -Iseconds) pair-connect user=$1" >> "$SESSION_ROOT/activity-log"
+
+cd "$REPO_PATH" || exit 1
+
+# Function to start/attach tmux with optional nix environment
+start_tmux() {
+    # -A: attach if exists, create if not
+    # -s: session name
+    exec tmux new-session -A -s "$TMUX_SESSION" "$@"
+}
+
+case "$ENVIRONMENT" in
+    noenv|python)
+        # Wrap tmux in nix develop
+        exec nix develop "$FLAKE_PATH" --command tmux new-session -A -s "$TMUX_SESSION"
+        ;;
+    flake)
+        exec nix develop "$REPO_PATH" --command tmux new-session -A -s "$TMUX_SESSION"
+        ;;
+    legacy-nix)
+        if [ -f "$REPO_PATH/shell.nix" ]; then
+            exec nix-shell "$REPO_PATH/shell.nix" --command "tmux new-session -A -s $TMUX_SESSION"
+        else
+            exec nix-shell "$REPO_PATH/default.nix" --command "tmux new-session -A -s $TMUX_SESSION"
+        fi
+        ;;
+    *)
+        # No environment, just tmux
+        start_tmux
+        ;;
+esac
 "#)
 }

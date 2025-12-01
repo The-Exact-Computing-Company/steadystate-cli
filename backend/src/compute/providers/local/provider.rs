@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use anyhow::{Result, anyhow, Context};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::io::BufReader;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::compute::{
     traits::{ComputeProvider, ProviderCapabilities, SessionHealth, RemoteExecutor},
@@ -22,6 +22,7 @@ pub struct LocalComputeProvider {
     ssh_key_manager: SshKeyManager,
     state: Arc<LocalProviderState>,
     config: LocalProviderConfig,
+    http_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -47,13 +48,15 @@ struct WorkspaceInfo {
     repo_path: PathBuf,
 }
 
+
 impl LocalComputeProvider {
-    pub fn new(config: LocalProviderConfig) -> Self {
+    pub fn new(config: LocalProviderConfig, http_client: reqwest::Client) -> Self {
         Self {
             executor: Arc::new(LocalExecutor),
             ssh_key_manager: SshKeyManager::new(),
             state: Arc::new(LocalProviderState::default()),
             config,
+            http_client,
         }
     }
     
@@ -61,12 +64,14 @@ impl LocalComputeProvider {
     pub fn with_executor(
         config: LocalProviderConfig,
         executor: Arc<dyn RemoteExecutor>,
+        http_client: reqwest::Client,
     ) -> Self {
         Self {
             executor,
             ssh_key_manager: SshKeyManager::new(),
             state: Arc::new(LocalProviderState::default()),
             config,
+            http_client,
         }
     }
     
@@ -83,6 +88,89 @@ impl LocalComputeProvider {
             repo_path,
         })
     }
+
+    async fn setup_environment(
+        &self,
+        workspace: &WorkspaceInfo,
+        environment: Option<&str>,
+    ) -> Result<String> {
+        use crate::compute::common::python::{detect_python_version, generate_python_flake};
+        const NOENV_FLAKE_URL: &str = "https://raw.githubusercontent.com/The-Exact-Computing-Company/steadystate/main/backend/flakes/noenv";
+
+        match environment {
+            Some("noenv") => {
+            // Create flake directory in session workspace
+            let flake_dest = workspace.root.join("flake");
+            self.executor.mkdir_p(&flake_dest, 0o755).await?;
+            
+            // Fetch flake.nix from GitHub
+            let flake_nix = self.http_client
+                .get(format!("{}/flake.nix", NOENV_FLAKE_URL))
+                .send()
+                .await
+                .context("Failed to fetch noenv flake.nix")?
+                .error_for_status()
+                .context("GitHub returned error for flake.nix")?
+                .bytes()
+                .await?;
+            self.executor
+                .write_file(&flake_dest.join("flake.nix"), &flake_nix, 0o644)
+                .await?;
+            
+            // Fetch flake.lock from GitHub
+            let flake_lock = self.http_client
+                .get(format!("{}/flake.lock", NOENV_FLAKE_URL))
+                .send()
+                .await
+                .context("Failed to fetch noenv flake.lock")?
+                .error_for_status()
+                .context("GitHub returned error for flake.lock")?
+                .bytes()
+                .await?;
+            self.executor
+                .write_file(&flake_dest.join("flake.lock"), &flake_lock, 0o644)
+                .await?;
+            
+            // Return path to bake into wrapper
+            Ok(flake_dest.to_string_lossy().to_string())
+        }
+            Some("python") => {
+                // Detect Python version from repo files
+                let python_version = detect_python_version(
+                    self.executor.as_ref(),
+                    &workspace.repo_path,
+                ).await?;
+                
+                // Generate flake with detected version
+                let flake_content = generate_python_flake(python_version);
+                
+                let flake_dest = workspace.root.join("flake");
+                self.executor.mkdir_p(&flake_dest, 0o755).await?;
+                self.executor
+                    .write_file(
+                        &flake_dest.join("flake.nix"),
+                        flake_content.as_bytes(),
+                        0o644
+                    )
+                    .await?;
+                
+                tracing::info!(
+                    "Generated Python flake with {} for session",
+                    python_version.nix_attr()
+                );
+                
+                Ok(flake_dest.to_string_lossy().to_string())
+            }
+            Some("flake") | Some("legacy-nix") => {
+                // Use repo's own flake - path resolved at runtime via $WORKTREE
+                Ok("$WORKTREE".to_string())
+            }
+            _ => {
+                // No environment
+                Ok(String::new())
+            }
+        }
+    }
     
     async fn setup_collab_mode(
         &self,
@@ -94,6 +182,12 @@ impl LocalComputeProvider {
         
         // Clone repository
         git.clone(&request.repo_url, &workspace.repo_path, Some(1), None).await?;
+
+        // Setup environment - fetch flake if needed, get path to bake into wrapper
+        let flake_path = self.setup_environment(
+            workspace, 
+            request.environment.as_deref(),
+        ).await?;
         
         // Create canonical repo
         let canonical = workspace.root.join("canonical");
@@ -150,6 +244,8 @@ impl LocalComputeProvider {
             session_id,
             &branch_name,
             &request.repo_url,
+            request.environment.as_deref(),
+            &flake_path,
         ).await?;
         
         // Store state
@@ -190,12 +286,31 @@ impl LocalComputeProvider {
         request: &SessionRequest,
         session_id: &str,
     ) -> Result<SessionStartResult> {
-        // Porting the existing upterm logic, but using RemoteExecutor
         let git = GitOps::new(self.executor.as_ref());
         git.clone(&request.repo_url, &workspace.repo_path, Some(1), None).await?;
 
         let (creator_login, github_token) = self.extract_github_config(request);
-        // Setup SSH
+        
+        // Setup environment - fetch flake if needed
+        let flake_path = self.setup_environment(
+            workspace, 
+            request.environment.as_deref(),
+        ).await?;
+
+        // Configure git auth if token present
+        if let Some(token) = &github_token {
+            if request.repo_url.starts_with("https://") {
+                if let Ok(mut url) = url::Url::parse(&request.repo_url) {
+                    let _ = url.set_username("x-access-token");
+                    let _ = url.set_password(Some(token));
+                    if let Err(e) = git.set_remote_url(&workspace.repo_path, "origin", url.as_str()).await {
+                        tracing::warn!("Failed to configure git auth: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Build authorized keys - same as collab mode
         let authorized_keys = self.ssh_key_manager
             .build_authorized_keys_for_repo(
                 creator_login.as_deref(),
@@ -204,16 +319,14 @@ impl LocalComputeProvider {
                 github_token.as_deref(),
             )
             .await;
-            
-        // Write authorized keys to a file
-        let auth_keys_path = workspace.root.join("authorized_keys");
-        let auth_keys_content = self.ssh_key_manager.generate_authorized_keys_file(&authorized_keys, None);
-        self.executor.write_file(&auth_keys_path, auth_keys_content.as_bytes(), 0o600).await?;
 
-        // Launch upterm
-        let (pid, invite) = self.launch_upterm(
+        // Install pair-mode scripts
+        self.install_pair_scripts(workspace, session_id, request.environment.as_deref(), &flake_path).await?;
+
+        // Launch SSHD - reuse the same infrastructure as collab!
+        let (pid, ssh_invite, host_key) = self.launch_pair_sshd(
             workspace,
-            &auth_keys_path,
+            &authorized_keys,
             session_id,
         ).await?;
 
@@ -222,12 +335,140 @@ impl LocalComputeProvider {
             workspace_root: workspace.root.clone(),
         });
 
+        // Magic link format for pair mode (now SSH-based, same as collab)
+        let magic_link = format!(
+            "steadystate://pair/{}?ssh={}&host_key={}",
+            session_id,
+            urlencoding::encode(&ssh_invite),
+            urlencoding::encode(&host_key)
+        );
+
         Ok(SessionStartResult {
-            endpoint: Some(invite.clone()),
-            magic_link: Some(format!("steadystate://pair/{}?upterm={}", 
-                session_id, urlencoding::encode(&invite))),
-            host_public_key: None, // Upterm manages its own keys
+            endpoint: Some(ssh_invite),
+            magic_link: Some(magic_link),
+            host_public_key: Some(host_key),
         })
+    }
+
+    async fn install_pair_scripts(
+        &self,
+        workspace: &WorkspaceInfo,
+        session_id: &str,
+        environment: Option<&str>,
+        flake_path: &str,
+    ) -> Result<()> {
+        let bin_dir = workspace.root.join("bin");
+        self.executor.mkdir_p(&bin_dir, 0o755).await?;
+
+        // Create activity log
+        let activity_log = workspace.root.join("activity-log");
+        self.executor.write_file(&activity_log, &[], 0o666).await?;
+
+        // Create pair wrapper script
+        let wrapper_content = scripts::pair_wrapper_script().render(&{
+            let mut vars = HashMap::new();
+            vars.insert("session_root", workspace.root.to_str().unwrap());
+            vars.insert("session_id", session_id);
+            vars.insert("environment", environment.unwrap_or("none"));
+            vars.insert("flake_path", flake_path);
+            vars
+        });
+        
+        self.executor
+            .write_file(&bin_dir.join("pair-wrapper"), wrapper_content.as_bytes(), 0o755)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn launch_pair_sshd(
+        &self,
+        workspace: &WorkspaceInfo,
+        authorized_keys: &[crate::compute::common::ssh_keys::AuthorizedKey],
+        session_id: &str,
+    ) -> Result<(u32, String, String)> {
+        let ssh_dir = workspace.root.join("ssh");
+        self.executor.mkdir_p(&ssh_dir, 0o700).await?;
+
+        // Generate host keys
+        let host_key_path = ssh_dir.join("host_key");
+        sshd::generate_host_keys(self.executor.as_ref(), &host_key_path).await?;
+
+        // Write authorized_keys with pair-wrapper as forced command
+        let auth_keys_path = ssh_dir.join("authorized_keys");
+        let wrapper_template = format!("{}/bin/pair-wrapper {{user}}", workspace.root.display());
+        let auth_keys_content = self.ssh_key_manager
+            .generate_authorized_keys_file(authorized_keys, Some(&wrapper_template));
+        self.executor
+            .write_file(&auth_keys_path, auth_keys_content.as_bytes(), 0o600)
+            .await?;
+
+        // Find available port
+        let port = self.find_available_port().await?;
+
+        // Configure SSHD
+        let pid_file = ssh_dir.join("sshd.pid");
+        let config = SshdConfig {
+            port,
+            host_key_path: host_key_path.clone(),
+            authorized_keys_path: auth_keys_path,
+            pid_file_path: pid_file.clone(),
+            log_level: SshdLogLevel::Info,
+            permit_user_environment: true,
+        };
+
+        let config_path = ssh_dir.join("sshd_config");
+        self.executor
+            .write_file(&config_path, config.generate().as_bytes(), 0o600)
+            .await?;
+
+        // Launch SSHD
+        let sshd_binary = sshd::find_sshd_binary(self.executor.as_ref()).await?;
+        let config_path_str = config_path.to_str().unwrap();
+        let log_path = ssh_dir.join("sshd.log");
+        let log_path_str = log_path.to_str().unwrap();
+
+        let (pid, _, _) = self.executor
+            .exec_streaming(&sshd_binary, &["-f", config_path_str, "-D", "-E", log_path_str])
+            .await?;
+
+        // Wait for SSHD to be ready
+        let mut attempts = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            
+            attempts += 1;
+            if attempts > 50 {
+                let _ = self.executor.exec_shell(&format!("kill {}", pid)).await;
+                let log = self.executor.exec_shell(&format!("cat {}", log_path_str)).await
+                    .map(|o| o.stdout).unwrap_or_default();
+                return Err(anyhow!("SSHD failed to start: {}", log));
+            }
+        }
+
+        // Build SSH invite
+        let hostname = Self::get_external_hostname().await;
+        let user = crate::compute::ssh_session_user();
+        let invite = format!("ssh://{}@{}:{}", user, hostname, port);
+
+        // Get host public key
+        let pub_key_content = self.executor
+            .read_file(Path::new(&format!("{}.pub", host_key_path.display())))
+            .await?;
+        let pub_key_str = String::from_utf8(pub_key_content)?;
+        let host_key = pub_key_str
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        tracing::info!("Pair mode SSHD started on port {}, invite: {}", port, invite);
+
+        Ok((pid, invite, host_key))
     }
     
     async fn install_scripts(
@@ -294,6 +535,8 @@ impl LocalComputeProvider {
         session_id: &str,
         branch_name: &str,
         repo_url: &str,
+        environment: Option<&str>,
+        flake_path: &str,
     ) -> Result<(u32, String, String)> {
         let ssh_dir = workspace.root.join("ssh");
         self.executor.mkdir_p(&ssh_dir, 0o700).await?;
@@ -320,6 +563,9 @@ impl LocalComputeProvider {
             vars.insert("session_id", session_id);
             vars.insert("repo_name", &repo_name);
             vars.insert("branch_name", branch_name);
+            // Bake environment config into wrapper
+            vars.insert("environment", environment.unwrap_or("none"));
+            vars.insert("flake_path", flake_path);
             vars
         });
         self.executor.write_file(&workspace.root.join("bin/steadystate-wrapper"), wrapper_content.as_bytes(), 0o755).await?;
@@ -411,48 +657,6 @@ impl LocalComputeProvider {
             .join(" ");
 
         Ok((pid, invite, host_key))
-    }
-
-    async fn launch_upterm(
-        &self,
-        _workspace: &WorkspaceInfo,
-        auth_keys_path: &Path,
-        session_id: &str,
-    ) -> Result<(u32, String)> {
-        // Simplified upterm launch
-        let cmd = "upterm";
-        let args = vec![
-            "host",
-            "--authorized-keys",
-            auth_keys_path.to_str().ok_or_else(|| anyhow!("Invalid auth keys path"))?,
-            "--accept",
-            "--",
-            "bash"
-        ];
-        
-        // We need to capture stdout to get the invite
-        // This is tricky with the generic RemoteExecutor if we don't have specialized support.
-        // But exec_streaming returns stdout stream.
-        
-        let (pid, _stdout, _) = self.executor.exec_streaming(cmd, &args.iter().map(|s| *s).collect::<Vec<_>>()).await?;
-        
-        // We need to parse stdout for the invite
-        // This logic is similar to capture_upterm_invite in local_provider.rs
-        // For now, let's assume we can read it.
-        
-        // NOTE: This is a blocking read in this async function if we're not careful.
-        // We should spawn a task to read it.
-        
-        // For this refactoring, I'll simplify and just return the PID and a placeholder invite if I can't easily parse it.
-        // But the user expects a working invite.
-        
-        // Let's reuse the logic from local_provider.rs if possible, or reimplement it.
-        // I'll skip the complex parsing for this first pass of the file creation to avoid errors, 
-        // but I should add it back.
-        
-        let invite = format!("upterm-session-{}", session_id); // Placeholder
-        
-        Ok((pid, invite))
     }
 
     /// Get a hostname/IP that external machines can use to connect
@@ -556,7 +760,6 @@ impl ComputeProvider for LocalComputeProvider {
     
     async fn terminate_session(&self, session: &Session) -> Result<()> {
         if let Some((_, local_session)) = self.state.live_sessions.remove(&session.id) {
-            // Kill process
             // Kill process
             if let Err(e) = self.executor
                 .exec_shell(&format!("kill -TERM {}", local_session.pid))

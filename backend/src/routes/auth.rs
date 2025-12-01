@@ -81,6 +81,7 @@ pub async fn poll(
                 jwt: None,
                 refresh_token: None,
                 login: None,
+                provider_access_token: None,
                 error: Some("invalid_device_code".into()),
             }))
         }
@@ -109,10 +110,10 @@ pub async fn poll(
                 .map_err(internal)?;
             let refresh_token = state.issue_refresh_token(identity.login.clone(), provider_id);
 
-            if let Some(token) = provider_access_token {
+            if let Some(ref token) = provider_access_token {
                 state.provider_tokens.insert(
                     (identity.provider.clone(), identity.login.clone()),
-                    token
+                    token.clone()
                 );
                 if let Err(e) = state.save_tokens() {
                     warn!("Failed to persist tokens: {}", e);
@@ -124,6 +125,7 @@ pub async fn poll(
                 jwt: Some(jwt),
                 refresh_token: Some(refresh_token),
                 login: Some(identity.login),
+                provider_access_token: provider_access_token.clone(),
                 error: None,
             }))
         }
@@ -132,6 +134,7 @@ pub async fn poll(
             Ok(Json(PollOut {
                 status: Some("pending".into()),
                 jwt: None, refresh_token: None, login: None,
+                provider_access_token: None,
                 error: None,
             }))
         },
@@ -140,6 +143,7 @@ pub async fn poll(
             Ok(Json(PollOut {
                 status: Some("pending".into()),
                 jwt: None, refresh_token: None, login: None,
+                provider_access_token: None,
                 error: Some("slow_down".into()),
             }))
         },
@@ -150,6 +154,7 @@ pub async fn poll(
                 jwt: None,
                 refresh_token: None,
                 login: None,
+                provider_access_token: None,
                 error: Some(e.to_string()),
             }))
         }
